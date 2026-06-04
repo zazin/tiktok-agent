@@ -19,7 +19,7 @@ tiktok-pipeline (server)            ImageKit /tiktok            tiktok-agent (th
 | `agent.py` | Orchestrator — poll → download → push → (auto-post) → record |
 | `imagekit_source.py` | List + download images from the ImageKit folder |
 | `adb_pusher.py` | Push an image to the phone gallery over adb (+ media scan) |
-| `tiktok_poster.py` | Best-effort auto-post via adb UI automation |
+| `tiktok_poster.py` | Best-effort auto-post via adb UI automation (also the `tiktok-post` CLI) |
 | `env_loader.py` | Zero-dependency `.env` loader |
 | `agent_state.json` | Local record of processed `fileId`s (gitignored) |
 
@@ -45,7 +45,16 @@ uv run tiktok-agent --once --auto-post
 
 # Just inspect the ImageKit queue
 uv run tiktok-source --folder /tiktok
+
+# Post an image that is ALREADY on the phone (no download)
+uv run tiktok-post --list                                   # see gallery images
+uv run tiktok-post /sdcard/Pictures/foo.jpg                 # open composer (Phase 1)
+uv run tiktok-post /sdcard/Pictures/foo.jpg --auto-post --caption "..."
 ```
+
+When the agent (or `tiktok-post`) auto-posts with a caption, it types into TikTok's caption
+field via `adb input text`, which can't enter emoji — emoji are stripped (text + hashtags are
+kept). The full caption with emoji still lives in the image's ImageKit custom metadata.
 
 ## Requirements
 
