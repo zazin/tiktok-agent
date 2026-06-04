@@ -191,32 +191,62 @@ def _wait_and_tap(
     return False
 
 
-def _type_caption(caption: str, serial: Optional[str]) -> bool:
-    """Tap the caption/title field and type `caption`. Best-effort; True if typed."""
+def _input_line(line: str, serial: Optional[str]) -> None:
+    """Type one line into the focused field via `adb input text`."""
+    # `adb input text` can't type emoji/non-ASCII — strip those (the full text
+    # still lives in ImageKit metadata). Quotes confuse the shell; spaces -> %s.
+    ascii_only = line.encode("ascii", "ignore").decode()
+    ascii_only = re.sub(r"[\"'`]", "", ascii_only)
+    safe = re.sub(r"[ \t]+", " ", ascii_only).strip().replace(" ", "%s")
+    if safe:
+        run_adb(["shell", "input", "text", safe], serial=serial)
+
+
+def _type_caption(text: str, serial: Optional[str]) -> bool:
+    """
+    Tap the caption/title field and type `text`. Best-effort; True if typed.
+
+    Newlines in `text` are entered as real line breaks (KEYCODE_ENTER), so a
+    combined "caption\\ndescription" lands on separate lines in the post.
+    """
     field = _find_tappable(_dump_ui(serial), CAPTION_HINTS)
     if not field:
         return False
     _tap(serial, *field)
     time.sleep(1.0)
-    # `adb input text` can't type emoji/non-ASCII — strip those (the full caption
-    # still lives in ImageKit metadata). Keep words + hashtags; quotes confuse the
-    # shell, and spaces must be sent as %s.
-    ascii_only = caption.encode("ascii", "ignore").decode()
-    ascii_only = re.sub(r"[\"'`]", "", ascii_only)
-    safe = re.sub(r"\s+", " ", ascii_only).strip().replace(" ", "%s")
-    if safe:
-        run_adb(["shell", "input", "text", safe], serial=serial)
-    time.sleep(1.0)
+
+    for i, line in enumerate(text.split("\n")):
+        if i > 0:
+            run_adb(["shell", "input", "keyevent", "66"], serial=serial)  # ENTER -> newline
+            time.sleep(0.3)
+        _input_line(line, serial)
+        time.sleep(0.3)
+
     # Dismiss the keyboard so it doesn't cover the Post button.
     run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
     time.sleep(0.5)
     return True
 
 
+def build_post_text(caption: Optional[str], description: Optional[str]) -> str:
+    """
+    Combine caption + description into TikTok's single text field.
+
+    TikTok has only one text box, so the caption (hook + hashtags) goes first and
+    the description follows on a new line. Either may be empty.
+    """
+    cap = (caption or "").strip()
+    desc = (description or "").strip()
+    if cap and desc:
+        return f"{cap}\n{desc}"
+    return cap or desc
+
+
 def post(
     remote_path: str,
     *,
     caption: Optional[str] = None,
+    description: Optional[str] = None,
     serial: Optional[str] = None,
     package: Optional[str] = None,
     auto_post: bool = False,
@@ -228,6 +258,9 @@ def post(
     If auto_post is True, attempts to advance through Next/Post screens and returns
     "posted" on success or "needs_manual" if a screen wasn't recognized.
 
+    The caption and description are combined (see build_post_text) into TikTok's
+    single text field — caption first, description on the next line.
+
     Raises:
         TikTokPostError: If Phase 1 itself fails (no TikTok / unshareable image).
     """
@@ -237,12 +270,14 @@ def post(
     if not auto_post:
         return "composer_open"
 
+    post_text = build_post_text(caption, description)
+
     # Phase 2 — walk the ordered post flow. The final step is the actual publish;
-    # type the caption (if any) on the screen just before it.
+    # type the post text (if any) on the screen just before it.
     last_idx = len(POST_FLOW_STEPS) - 1
     for idx, labels in enumerate(POST_FLOW_STEPS):
-        if idx == last_idx and caption:
-            _type_caption(caption, serial)  # best-effort, never fatal
+        if idx == last_idx and post_text:
+            _type_caption(post_text, serial)  # best-effort, never fatal
         if not _wait_and_tap(labels, serial):
             # A screen we didn't recognize — stop and leave it for the human.
             return "needs_manual"
@@ -275,7 +310,8 @@ def _cli() -> int:
     parser.add_argument("path", nargs="?", help="On-device image path, e.g. /sdcard/Pictures/foo.jpg")
     parser.add_argument("--list", action="store_true", help="List gallery images on the phone and exit")
     parser.add_argument("--gallery", default="/sdcard/Pictures", help="Gallery folder to list/pick from (default: /sdcard/Pictures)")
-    parser.add_argument("--caption", default=None, help="Caption text (used by auto-post phase)")
+    parser.add_argument("--caption", default=None, help="Caption text (hook + hashtags; used by auto-post phase)")
+    parser.add_argument("--description", default=None, help="Description appended after the caption on a new line")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones)")
     parser.add_argument("--package", default=None, help="Override TikTok package name")
     parser.add_argument("--auto-post", action="store_true", help="Drive Next/Post automatically (brittle; actually publishes)")
@@ -295,6 +331,7 @@ def _cli() -> int:
         status = post(
             args.path,
             caption=args.caption,
+            description=args.description,
             serial=args.serial,
             package=args.package,
             auto_post=args.auto_post,

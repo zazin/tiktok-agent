@@ -66,6 +66,14 @@ def _caption_from_file(meta: dict) -> Optional[str]:
     return None
 
 
+def _description_from_file(meta: dict) -> Optional[str]:
+    """ImageKit customMetadata.description, if present."""
+    cm = meta.get("customMetadata") or {}
+    if isinstance(cm, dict) and cm.get("description"):
+        return str(cm["description"])
+    return None
+
+
 def process_once(
     *,
     folder: str,
@@ -109,7 +117,14 @@ def process_once(
 
                 if auto_post:
                     caption = _caption_from_file(meta)
-                    status = post(remote, caption=caption, serial=serial, auto_post=True)
+                    description = _description_from_file(meta)
+                    status = post(
+                        remote,
+                        caption=caption,
+                        description=description,
+                        serial=serial,
+                        auto_post=True,
+                    )
                     entry["status"] = status
                     _log(f"  tiktok: {status}")
                 else:
