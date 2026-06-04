@@ -29,12 +29,28 @@ from adb_pusher import run_adb, PhonePushError
 # TikTok package names: global app, then the older/alt package as fallback.
 TIKTOK_PACKAGES = ("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
-# Button labels we look for, in the order we try to advance the composer.
-ADVANCE_LABELS = ("Next", "Post", "Selanjutnya", "Posting", "Kirim")
+# The post flow is an ORDERED sequence of screen-advances. Each entry lists the
+# equivalent button labels (English + Indonesian) for one screen. We advance
+# through them in order so an ambiguous label on a later screen can't be tapped
+# early. Discovered on com.ss.android.ugc.trill; tune here if TikTok's UI shifts.
+POST_FLOW_STEPS: tuple[tuple[str, ...], ...] = (
+    ("Foto", "Photo"),                              # share sheet → post as a photo
+    ("Berikutnya", "Next", "Selanjutnya"),          # editor → next
+    ("Posting", "Post", "Posting sekarang", "Kirim"),  # final → publish
+)
 
-# Per-step UI dump/tap pacing and overall Phase-2 attempt budget.
-STEP_DELAY = 2.0
-MAX_ADVANCE_STEPS = 6
+# Text fields where a caption/title can be typed (tapped before the final post).
+CAPTION_HINTS = (
+    "Tambahkan judul yang menarik",
+    "Tambahkan deskripsi",
+    "Add a title",
+    "Add caption",
+    "Tell viewers about your post",
+)
+
+# Per-step pacing: how long to wait for a screen, and retries while it loads.
+STEP_DELAY = 2.5
+STEP_RETRIES = 6
 
 
 class TikTokPostError(Exception):
@@ -58,21 +74,29 @@ def _resolve_content_uri(remote_path: str, serial: Optional[str]) -> Optional[st
     """
     Resolve a /sdcard/... file to its MediaStore content:// URI so it can be
     shared to another app (file:// URIs are blocked by scoped storage).
-    Returns None if it isn't indexed yet.
+
+    Matches on `_display_name` (the filename) rather than `_data` (the full
+    path): on scoped-storage / MIUI devices a `_data` WHERE clause often returns
+    nothing even though the file is indexed. Returns None if not indexed yet.
     """
+    name = remote_path.rsplit("/", 1)[-1]
+    # Escape single quotes in the filename for the SQL-ish WHERE clause.
+    safe = name.replace("'", "''")
     out = run_adb(
         [
             "shell", "content", "query",
             "--uri", "content://media/external/images/media",
             "--projection", "_id",
-            "--where", f"\"_data='{remote_path}'\"",
+            "--where", f"\"_display_name='{safe}'\"",
         ],
         serial=serial,
     )
-    m = re.search(r"_id=(\d+)", out)
-    if not m:
+    ids = re.findall(r"_id=(\d+)", out)
+    if not ids:
         return None
-    return f"content://media/external/images/media/{m.group(1)}"
+    # If the same filename appears more than once, the most recently inserted
+    # row (highest _id) is the one we just pushed.
+    return f"content://media/external/images/media/{max(ids, key=int)}"
 
 
 def open_in_tiktok(
@@ -149,6 +173,41 @@ def _tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
 
+def _wait_and_tap(
+    labels: tuple[str, ...],
+    serial: Optional[str],
+    *,
+    retries: int = STEP_RETRIES,
+    delay: float = STEP_DELAY,
+) -> bool:
+    """Poll the UI until a node matching `labels` appears, then tap it. True if tapped."""
+    for _ in range(retries):
+        target = _find_tappable(_dump_ui(serial), labels)
+        if target:
+            _tap(serial, *target)
+            time.sleep(delay)
+            return True
+        time.sleep(delay)
+    return False
+
+
+def _type_caption(caption: str, serial: Optional[str]) -> bool:
+    """Tap the caption/title field and type `caption`. Best-effort; True if typed."""
+    field = _find_tappable(_dump_ui(serial), CAPTION_HINTS)
+    if not field:
+        return False
+    _tap(serial, *field)
+    time.sleep(1.0)
+    # `input text` splits on spaces, so send %s for each space and avoid quotes.
+    safe = re.sub(r"[\"'`]", "", caption).replace(" ", "%s")
+    run_adb(["shell", "input", "text", safe], serial=serial)
+    time.sleep(1.0)
+    # Dismiss the keyboard so it doesn't cover the Post button.
+    run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
+    time.sleep(0.5)
+    return True
+
+
 def post(
     remote_path: str,
     *,
@@ -173,16 +232,75 @@ def post(
     if not auto_post:
         return "composer_open"
 
-    # Phase 2 — best-effort: repeatedly find and tap an advance control.
-    advanced = 0
-    for _ in range(MAX_ADVANCE_STEPS):
-        xml = _dump_ui(serial)
-        target = _find_tappable(xml, ADVANCE_LABELS)
-        if not target:
-            # Nothing recognizable to tap — stop and leave it for the human.
-            return "posted" if advanced else "needs_manual"
-        _tap(serial, *target)
-        advanced += 1
-        time.sleep(STEP_DELAY)
+    # Phase 2 — walk the ordered post flow. The final step is the actual publish;
+    # type the caption (if any) on the screen just before it.
+    last_idx = len(POST_FLOW_STEPS) - 1
+    for idx, labels in enumerate(POST_FLOW_STEPS):
+        if idx == last_idx and caption:
+            _type_caption(caption, serial)  # best-effort, never fatal
+        if not _wait_and_tap(labels, serial):
+            # A screen we didn't recognize — stop and leave it for the human.
+            return "needs_manual"
+    return "posted"
 
-    return "posted" if advanced else "needs_manual"
+
+def list_gallery(serial: Optional[str] = None, folder: str = "/sdcard/Pictures") -> list[str]:
+    """List image file paths already on the phone under `folder`."""
+    try:
+        out = run_adb(["shell", "ls", "-1", folder], serial=serial)
+    except PhonePushError:
+        return []
+    exts = (".jpg", ".jpeg", ".png", ".webp")
+    return [
+        f"{folder.rstrip('/')}/{line.strip()}"
+        for line in out.splitlines()
+        if line.strip().lower().endswith(exts)
+    ]
+
+
+def _cli() -> int:
+    import argparse
+    import sys
+    from env_loader import load_env
+    load_env()
+
+    parser = argparse.ArgumentParser(
+        description="Post an image that is ALREADY on the phone to TikTok (no download)."
+    )
+    parser.add_argument("path", nargs="?", help="On-device image path, e.g. /sdcard/Pictures/foo.jpg")
+    parser.add_argument("--list", action="store_true", help="List gallery images on the phone and exit")
+    parser.add_argument("--gallery", default="/sdcard/Pictures", help="Gallery folder to list/pick from (default: /sdcard/Pictures)")
+    parser.add_argument("--caption", default=None, help="Caption text (used by auto-post phase)")
+    parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones)")
+    parser.add_argument("--package", default=None, help="Override TikTok package name")
+    parser.add_argument("--auto-post", action="store_true", help="Drive Next/Post automatically (brittle; actually publishes)")
+    args = parser.parse_args()
+
+    if args.list:
+        imgs = list_gallery(args.serial, args.gallery)
+        print(f"{len(imgs)} image(s) in {args.gallery}:")
+        for p in imgs:
+            print(f"  {p}")
+        return 0
+
+    if not args.path:
+        parser.error("provide an on-device image path, or use --list to see options")
+
+    try:
+        status = post(
+            args.path,
+            caption=args.caption,
+            serial=args.serial,
+            package=args.package,
+            auto_post=args.auto_post,
+        )
+    except TikTokPostError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Result: {status}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_cli())

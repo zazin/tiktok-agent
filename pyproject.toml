@@ -9,6 +9,7 @@ dependencies = []
 [project.scripts]
 tiktok-agent = "agent:_cli"
 tiktok-source = "imagekit_source:_cli"
+tiktok-post = "tiktok_poster:_cli"
 
 [tool.uv]
 package = true
