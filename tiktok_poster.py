@@ -198,9 +198,14 @@ def _type_caption(caption: str, serial: Optional[str]) -> bool:
         return False
     _tap(serial, *field)
     time.sleep(1.0)
-    # `input text` splits on spaces, so send %s for each space and avoid quotes.
-    safe = re.sub(r"[\"'`]", "", caption).replace(" ", "%s")
-    run_adb(["shell", "input", "text", safe], serial=serial)
+    # `adb input text` can't type emoji/non-ASCII — strip those (the full caption
+    # still lives in ImageKit metadata). Keep words + hashtags; quotes confuse the
+    # shell, and spaces must be sent as %s.
+    ascii_only = caption.encode("ascii", "ignore").decode()
+    ascii_only = re.sub(r"[\"'`]", "", ascii_only)
+    safe = re.sub(r"\s+", " ", ascii_only).strip().replace(" ", "%s")
+    if safe:
+        run_adb(["shell", "input", "text", safe], serial=serial)
     time.sleep(1.0)
     # Dismiss the keyboard so it doesn't cover the Post button.
     run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
