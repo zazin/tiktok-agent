@@ -284,6 +284,32 @@ def post(
     return "posted"
 
 
+def caption_from_imagekit(image_path: str, *, folder: str = "/tiktok") -> tuple[Optional[str], Optional[str]]:
+    """
+    Look up (caption, description) for an on-phone image by matching its base
+    filename against the ImageKit folder listing.
+
+    The pipeline pushes `tiktok_<ts>.<ext>` to the phone and uploads
+    `tiktok_<ts>_<unique>.<ext>` to ImageKit, so the ImageKit name shares the
+    phone file's base name. Returns (None, None) if no match / lookup fails.
+    """
+    from imagekit_source import list_images, ImageKitSourceError
+
+    name = image_path.rsplit("/", 1)[-1]
+    base = name.rsplit(".", 1)[0]
+    try:
+        files = list_images(folder=folder, limit=200)  # newest first
+    except ImageKitSourceError:
+        return None, None
+
+    for f in files:
+        ik_base = (f.get("name") or "").rsplit(".", 1)[0]
+        if ik_base == base or ik_base.startswith(base + "_"):
+            cm = f.get("customMetadata") or {}
+            return cm.get("caption"), cm.get("description")
+    return None, None
+
+
 def list_gallery(serial: Optional[str] = None, folder: str = "/sdcard/Pictures") -> list[str]:
     """List image file paths already on the phone under `folder`."""
     try:
@@ -312,6 +338,8 @@ def _cli() -> int:
     parser.add_argument("--gallery", default="/sdcard/Pictures", help="Gallery folder to list/pick from (default: /sdcard/Pictures)")
     parser.add_argument("--caption", default=None, help="Caption text (hook + hashtags; used by auto-post phase)")
     parser.add_argument("--description", default=None, help="Description appended after the caption on a new line")
+    parser.add_argument("--from-imagekit", action="store_true", help="Auto-fetch caption + description from the image's ImageKit metadata")
+    parser.add_argument("--folder", default="/tiktok", help="ImageKit folder to look up metadata in (with --from-imagekit, default: /tiktok)")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones)")
     parser.add_argument("--package", default=None, help="Override TikTok package name")
     parser.add_argument("--auto-post", action="store_true", help="Drive Next/Post automatically (brittle; actually publishes)")
@@ -327,11 +355,23 @@ def _cli() -> int:
     if not args.path:
         parser.error("provide an on-device image path, or use --list to see options")
 
+    caption, description = args.caption, args.description
+    if args.from_imagekit:
+        fcap, fdesc = caption_from_imagekit(args.path, folder=args.folder)
+        # Explicit flags win; otherwise use what ImageKit returned.
+        caption = caption or fcap
+        description = description or fdesc
+        if fcap or fdesc:
+            print(f"From ImageKit — caption: {caption!r}")
+            print(f"             description: {(description or '')[:70]!r}")
+        else:
+            print(f"From ImageKit — no metadata found for {args.path.rsplit('/', 1)[-1]}", file=sys.stderr)
+
     try:
         status = post(
             args.path,
-            caption=args.caption,
-            description=args.description,
+            caption=caption,
+            description=description,
             serial=args.serial,
             package=args.package,
             auto_post=args.auto_post,

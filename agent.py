@@ -141,12 +141,41 @@ def process_once(
     return done
 
 
+def catch_up(*, folder: str, state_path: Path) -> int:
+    """
+    Mark every image currently in the folder as processed WITHOUT posting it.
+
+    Run this once before starting an always-on auto-posting watch so the daemon
+    only posts images uploaded from now on, not the existing backlog. Returns the
+    number of images newly marked.
+    """
+    from imagekit_source import list_images, ImageKitSourceError
+
+    state = _load_state(state_path)
+    processed = state.setdefault("processed", {})
+    try:
+        files = list_images(folder=folder)
+    except ImageKitSourceError as e:
+        _log(f"Catch-up list failed: {e}")
+        return 0
+
+    n = 0
+    for meta in files:
+        fid = meta.get("fileId")
+        if fid and fid not in processed:
+            processed[fid] = {"name": meta.get("name"), "status": "catch-up", "ts": int(time.time())}
+            n += 1
+    _save_state(state_path, state)
+    _log(f"Catch-up: marked {n} existing image(s) as seen ({len(files)} in {folder}).")
+    return n
+
+
 def _cli() -> int:
     from env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(
-        description="Poll ImageKit, push new images to a connected phone, optionally auto-post to TikTok."
+        description="Poll ImageKit, push new images to a connected phone, and auto-post them to TikTok."
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Process new images once and exit (default)")
@@ -156,10 +185,25 @@ def _cli() -> int:
     parser.add_argument("--state", default=DEFAULT_STATE, help=f"Path to the processed-state JSON (default: {DEFAULT_STATE})")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
     parser.add_argument("--dest", default="/sdcard/Pictures", help="Remote dir on the phone (default: /sdcard/Pictures)")
-    parser.add_argument("--auto-post", action="store_true", help="Attempt to auto-post to TikTok via adb UI automation (brittle, opt-in)")
+    parser.add_argument(
+        "--auto-post",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-post each new image to TikTok (default: on; use --no-auto-post to only push to the phone)",
+    )
+    parser.add_argument(
+        "--catch-up",
+        action="store_true",
+        help="Mark all current images as seen WITHOUT posting, then exit (run before an always-on watch to skip the backlog)",
+    )
     args = parser.parse_args()
 
     state_path = Path(args.state)
+
+    if args.catch_up:
+        catch_up(folder=args.folder, state_path=state_path)
+        return 0
+
     kw = dict(
         folder=args.folder,
         state_path=state_path,
