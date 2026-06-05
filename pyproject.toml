@@ -1,7 +1,7 @@
 [project]
 name = "tiktok-agent"
 version = "0.1.0"
-description = "Poll the ImageKit /tiktok folder, push new images to a connected Android phone over adb, and optionally auto-post them to TikTok."
+description = "Poll the Airtable Posts queue, push each pending image to a connected Android phone over adb, and auto-post it to TikTok."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
