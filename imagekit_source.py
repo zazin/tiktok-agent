@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-ImageKit as the work queue.
+ImageKit access — image download (both sources) + the legacy folder queue.
 
-Lists images in an ImageKit folder via the Media Management API and downloads
-them locally. The tiktok-agent polls this to discover images the tiktok-pipeline
-has uploaded.
+`download()` is used by both sources to fetch an image from its public ImageKit
+CDN URL (no auth). `list_images()` powers the legacy `--source imagekit` queue:
+it lists an ImageKit folder via the Media Management API so the tiktok-agent can
+discover images the tiktok-pipeline uploaded. The default source of truth is now
+Airtable (see airtable_source.py); this folder listing is the legacy fallback.
 
 Auth uses the SAME scheme as the pipeline's uploader: HTTP Basic with the
 private key as username and an empty password.
