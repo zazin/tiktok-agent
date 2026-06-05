@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """
-tiktok-agent — bridge between the ImageKit queue and a connected Android phone.
+tiktok-agent — bridge between the work queue and a connected Android phone.
 
-On each poll it:
-  1. lists the ImageKit /tiktok folder (the pipeline's output),
-  2. finds images whose fileId is not yet in the local state file,
-  3. downloads each new image,
-  4. adb-pushes it into the phone gallery,
-  5. (optional) auto-posts it to TikTok over adb,
-  6. records the fileId so it is never processed twice.
+The default source of truth is an Airtable "Posts" table the tiktok-pipeline
+writes to (see tiktok-pipeline/docs/airtable.md). On each poll it:
+  1. lists Airtable records with Status == "pending" (oldest first),
+  2. downloads each record's image from its ImageKit ImageURL,
+  3. adb-pushes it into the phone gallery,
+  4. (optional) auto-posts it to TikTok over adb,
+  5. flips the record's Status to "posted" / "failed" so it isn't reprocessed.
+
+Pass --source imagekit to use the legacy ImageKit-folder queue instead, which
+dedups against a local JSON state file.
 
 Run it once, or as a watch loop on the device-connected computer.
 
 Credentials (read from .env, auto-loaded):
-  - IMAGEKIT_PRIVATE_KEY
+  - AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME  (airtable source)
+  - IMAGEKIT_PRIVATE_KEY                                     (imagekit source)
 
 Usage (CLI):
     python agent.py --once
-    python agent.py --once --auto-post
+    python agent.py --once --no-auto-post
     python agent.py --watch --interval 60
-    python agent.py --once --folder /tiktok --serial 827b946
+    python agent.py --once --source imagekit --folder /tiktok --serial 827b946
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from typing import Optional
 DEFAULT_FOLDER = "/tiktok"
 DEFAULT_STATE = "agent_state.json"
 DEFAULT_INTERVAL = 60
+DEFAULT_SOURCE = "airtable"
 
 
 def _log(msg: str) -> None:
@@ -76,6 +81,7 @@ def _description_from_file(meta: dict) -> Optional[str]:
 
 def process_once(
     *,
+    source: str,
     folder: str,
     state_path: Path,
     serial: Optional[str],
@@ -83,6 +89,85 @@ def process_once(
     dest_dir: str,
 ) -> int:
     """Run one poll cycle. Returns the number of newly processed images."""
+    if source == "airtable":
+        return _process_airtable(serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+    return _process_imagekit(
+        folder=folder, state_path=state_path, serial=serial, auto_post=auto_post, dest_dir=dest_dir
+    )
+
+
+def _process_airtable(*, serial: Optional[str], auto_post: bool, dest_dir: str) -> int:
+    """Poll the Airtable queue: post each pending record and flip its Status."""
+    from airtable_source import list_pending, update_status, AirtableSourceError
+    from imagekit_source import download, ImageKitSourceError
+    from adb_pusher import push_to_phone, PhonePushError
+    from tiktok_poster import post, TikTokPostError
+
+    try:
+        records = list_pending()
+    except AirtableSourceError as e:
+        _log(f"List failed: {e}")
+        return 0
+
+    _log(f"Poll: {len(records)} pending in Airtable")
+
+    def _set_status(rec_id: str, status: str) -> None:
+        try:
+            update_status(rec_id, status)
+        except AirtableSourceError as e:
+            _log(f"  status update failed for {rec_id} -> {status}: {e}")
+
+    done = 0
+    for rec in records:
+        rec_id = rec.get("id")
+        fields = rec.get("fields") or {}
+        if not rec_id:
+            continue
+        url = fields.get("ImageURL")
+        name = fields.get("ImagePath") or (url.rsplit("/", 1)[-1] if url else None) or f"{rec_id}.jpg"
+
+        if not url:
+            _log(f"  SKIP {rec_id}: no ImageURL")
+            _set_status(rec_id, "failed")
+            done += 1
+            continue
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                local = download(url, Path(tmp) / name)
+                remote = push_to_phone(str(local), dest_dir=dest_dir, serial=serial)
+                _log(f"  pushed {name} -> {remote}")
+
+                if not auto_post:
+                    _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
+                else:
+                    status = post(
+                        remote,
+                        caption=fields.get("Caption"),
+                        description=fields.get("Description"),
+                        serial=serial,
+                        auto_post=True,
+                    )
+                    _log(f"  tiktok: {status}")
+                    _set_status(rec_id, "posted" if status == "posted" else "failed")
+        except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
+            _log(f"  FAILED {name}: {e}")
+            _set_status(rec_id, "failed")
+
+        done += 1
+
+    return done
+
+
+def _process_imagekit(
+    *,
+    folder: str,
+    state_path: Path,
+    serial: Optional[str],
+    auto_post: bool,
+    dest_dir: str,
+) -> int:
+    """Legacy poll cycle: dedup the ImageKit folder against the local state file."""
     from imagekit_source import list_images, download, ImageKitSourceError
     from adb_pusher import push_to_phone, PhonePushError
     from tiktok_poster import post, TikTokPostError
@@ -141,14 +226,42 @@ def process_once(
     return done
 
 
-def catch_up(*, folder: str, state_path: Path) -> int:
+def _catch_up_airtable() -> int:
+    """Flip every current pending Airtable row to 'posted' without posting it."""
+    from airtable_source import list_pending, update_status, AirtableSourceError
+
+    try:
+        records = list_pending()
+    except AirtableSourceError as e:
+        _log(f"Catch-up list failed: {e}")
+        return 0
+
+    n = 0
+    for rec in records:
+        rec_id = rec.get("id")
+        if not rec_id:
+            continue
+        try:
+            update_status(rec_id, "posted")
+            n += 1
+        except AirtableSourceError as e:
+            _log(f"  catch-up failed for {rec_id}: {e}")
+    _log(f"Catch-up: marked {n} pending record(s) as posted (skipped without posting).")
+    return n
+
+
+def catch_up(*, source: str, folder: str, state_path: Path) -> int:
     """
-    Mark every image currently in the folder as processed WITHOUT posting it.
+    Skip the current backlog WITHOUT posting it.
 
     Run this once before starting an always-on auto-posting watch so the daemon
-    only posts images uploaded from now on, not the existing backlog. Returns the
-    number of images newly marked.
+    only posts items added from now on. For the airtable source this flips every
+    current pending row to "posted"; for imagekit it records each fileId as seen.
+    Returns the number of items newly marked.
     """
+    if source == "airtable":
+        return _catch_up_airtable()
+
     from imagekit_source import list_images, ImageKitSourceError
 
     state = _load_state(state_path)
@@ -175,14 +288,20 @@ def _cli() -> int:
     load_env()
 
     parser = argparse.ArgumentParser(
-        description="Poll ImageKit, push new images to a connected phone, and auto-post them to TikTok."
+        description="Poll the work queue, push new images to a connected phone, and auto-post them to TikTok."
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Process new images once and exit (default)")
     mode.add_argument("--watch", action="store_true", help="Keep polling on an interval until interrupted")
+    parser.add_argument(
+        "--source",
+        choices=("airtable", "imagekit"),
+        default=DEFAULT_SOURCE,
+        help=f"Work queue to read from (default: {DEFAULT_SOURCE})",
+    )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"Watch poll interval in seconds (default: {DEFAULT_INTERVAL})")
-    parser.add_argument("--folder", default=DEFAULT_FOLDER, help=f"ImageKit folder to watch (default: {DEFAULT_FOLDER})")
-    parser.add_argument("--state", default=DEFAULT_STATE, help=f"Path to the processed-state JSON (default: {DEFAULT_STATE})")
+    parser.add_argument("--folder", default=DEFAULT_FOLDER, help=f"ImageKit folder to watch (imagekit source only; default: {DEFAULT_FOLDER})")
+    parser.add_argument("--state", default=DEFAULT_STATE, help=f"Path to the processed-state JSON (imagekit source only; default: {DEFAULT_STATE})")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
     parser.add_argument("--dest", default="/sdcard/Pictures", help="Remote dir on the phone (default: /sdcard/Pictures)")
     parser.add_argument(
@@ -194,17 +313,18 @@ def _cli() -> int:
     parser.add_argument(
         "--catch-up",
         action="store_true",
-        help="Mark all current images as seen WITHOUT posting, then exit (run before an always-on watch to skip the backlog)",
+        help="Skip the current backlog WITHOUT posting, then exit (run before an always-on watch)",
     )
     args = parser.parse_args()
 
     state_path = Path(args.state)
 
     if args.catch_up:
-        catch_up(folder=args.folder, state_path=state_path)
+        catch_up(source=args.source, folder=args.folder, state_path=state_path)
         return 0
 
     kw = dict(
+        source=args.source,
         folder=args.folder,
         state_path=state_path,
         serial=args.serial,
@@ -213,7 +333,8 @@ def _cli() -> int:
     )
 
     if args.watch:
-        _log(f"Watching {args.folder} every {args.interval}s (Ctrl-C to stop)...")
+        where = args.folder if args.source == "imagekit" else "Airtable"
+        _log(f"Watching {where} every {args.interval}s (Ctrl-C to stop)...")
         try:
             while True:
                 process_once(**kw)

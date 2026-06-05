@@ -9,6 +9,7 @@ dependencies = []
 [project.scripts]
 tiktok-agent = "agent:_cli"
 tiktok-source = "imagekit_source:_cli"
+tiktok-airtable = "airtable_source:_cli"
 tiktok-post = "tiktok_poster:_cli"
 
 [tool.uv]
@@ -22,6 +23,7 @@ build-backend = "hatchling.build"
 include = [
     "agent.py",
     "imagekit_source.py",
+    "airtable_source.py",
     "adb_pusher.py",
     "tiktok_poster.py",
     "env_loader.py",
