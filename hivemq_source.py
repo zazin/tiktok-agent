@@ -17,9 +17,14 @@ from a **persistent session + QoS 1 + manual acknowledgement**:
     (the ``--no-auto-post`` path, or a crash before the post finishes) is
     redelivered on the next connect, so it stays pending until actually posted.
 
-A poll cycle = one connect → drain queued messages → process → ack the done ones →
-disconnect (via ``close()``). Disconnecting releases the unacked messages back to
-the broker so they are redelivered next cycle.
+Two consumption modes:
+  - ``watch(handler)`` — the event-driven (push) path: stay connected and react to
+    each message the instant it arrives. No poll interval. This is what
+    ``tiktok-agent --watch`` uses.
+  - ``list_pending()`` + ``update_status()`` + ``close()`` — a one-shot drain of the
+    current backlog (one connect → drain → process → ack the done ones →
+    disconnect). This is what ``--once`` / ``--catch-up`` use. Disconnecting
+    releases unacked messages back to the broker for redelivery next time.
 
 Auth is HiveMQ Cloud standard: TLS on port 8883 with a username/password.
 
@@ -57,10 +62,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     import paho.mqtt.client as mqtt
@@ -308,6 +314,115 @@ def close() -> None:
         with _lock:
             _buffer.clear()
             _pending_msgs.clear()
+
+
+def watch(handler: Callable[[dict], Optional[str]]) -> None:
+    """
+    Stay connected and dispatch each work message to ``handler`` the moment it
+    arrives — the event-driven (push) counterpart to ``list_pending()``. No poll
+    interval: MQTT pushes, so the agent reacts instantly.
+
+    ``handler(record)`` is called on a single worker thread (so messages are
+    processed one at a time, in order) and returns either:
+      - a terminal status string ("posted"/"failed") → published to the status
+        topic and the message is acked (consumed), or
+      - None (e.g. the --no-auto-post path) → the message is left unacked and is
+        redelivered on the next reconnect.
+
+    Incoming messages are handed to the worker via a queue so the network thread
+    stays responsive (keepalive pings keep flowing) even while a post is running.
+    Blocks until KeyboardInterrupt. Auto-reconnects (persistent QoS-1 session, so
+    nothing published during a blip is lost).
+
+    Raises:
+        HiveMQSourceError: On initial connection failure.
+    """
+    global _client, _config, _connect_error
+
+    if _client is not None:
+        close()
+    _config = _Config()
+    work: "queue.Queue[dict]" = queue.Queue()
+    stop = threading.Event()
+
+    def on_connect(client, userdata, flags, reason_code, properties) -> None:
+        global _connect_error
+        if reason_code.is_failure:
+            _connect_error = f"broker refused connection: {reason_code}"
+        else:
+            _connect_error = None
+            client.subscribe(_config.topic, qos=1)  # renewed on every reconnect
+        _connected.set()
+
+    def on_message(client, userdata, message) -> None:
+        rec = _parse(message)
+        if rec is None:
+            client.ack(message.mid, message.qos)  # drop malformed
+            return
+        with _lock:
+            _pending_msgs[rec["id"]] = message
+        work.put(rec)
+
+    client = mqtt.Client(
+        CallbackAPIVersion.VERSION2,
+        client_id=_config.client_id,
+        clean_session=False,
+        protocol=mqtt.MQTTv311,
+        manual_ack=True,
+    )
+    client.username_pw_set(_config.username, _config.password)
+    client.tls_set()
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    _connected.clear()
+    _connect_error = None
+    try:
+        client.connect(_config.host, _config.port, keepalive=60)
+    except (OSError, mqtt.WebsocketConnectionError) as e:
+        raise HiveMQSourceError(f"Failed to connect to {_config.host}:{_config.port}: {e}") from e
+
+    def worker() -> None:
+        while not stop.is_set():
+            try:
+                rec = work.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                status = handler(rec)
+            except Exception:  # handler is expected to handle its own errors; be defensive
+                status = "failed"
+            if status:
+                try:
+                    update_status(rec["id"], status)
+                except HiveMQSourceError:
+                    pass
+            work.task_done()
+
+    t = threading.Thread(target=worker, name="hivemq-worker", daemon=True)
+    t.start()
+    client.loop_start()
+    _client = client
+
+    if not _connected.wait(CONNECT_TIMEOUT):
+        stop.set()
+        close()
+        raise HiveMQSourceError(f"Timed out connecting to {_config.host}:{_config.port}")
+    if _connect_error:
+        err = _connect_error
+        stop.set()
+        close()
+        raise HiveMQSourceError(err)
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        close()
 
 
 def _cli() -> int:

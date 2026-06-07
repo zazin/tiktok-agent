@@ -2,7 +2,7 @@
 
 The device-side half of the TikTok system. It runs on a **computer with an Android phone connected via adb**, drains the **HiveMQ work topic** that [tiktok-pipeline](https://github.com/zazin/tiktok-pipeline) publishes to, and for each queued message: downloads the image from its public ImageKit URL, pushes it into the phone's gallery, **auto-posts it to TikTok** (caption + description straight from the message) by driving the on-device UI over adb, then reports the outcome (`posted`/`failed`) to the status topic and acks the message.
 
-Auto-post is **on by default** — run `tiktok-agent --watch` and it posts new messages hands-free. **HiveMQ is the queue / source of truth** — there is no database or table in between; the agent discovers work by draining the topic and reports back by publishing to the status topic. A **persistent QoS-1 session** means messages published while the device is offline are queued by the broker and delivered on reconnect; a message is **acked only after it posts**, so anything unposted is redelivered.
+Auto-post is **on by default** — run `tiktok-agent --watch` and it posts new messages hands-free. `--watch` is **event-driven**: it holds a persistent MQTT subscription and reacts to each message the instant it's published (no poll interval). **HiveMQ is the queue / source of truth** — there is no database or table in between; the agent discovers work by draining the topic and reports back by publishing to the status topic. A **persistent QoS-1 session** means messages published while the device is offline are queued by the broker and delivered on reconnect; a message is **acked only after it posts**, so anything unposted is redelivered.
 
 ```
 tiktok-pipeline (server)          HiveMQ (MQTT)             tiktok-agent (this, computer + adb + phone)
@@ -61,7 +61,7 @@ uv sync
 
 # Always-on: watch the HiveMQ queue and auto-post every new message, hands-free
 uv run tiktok-agent --catch-up        # first: drain the existing backlog as posted (skip it)
-uv run tiktok-agent --watch           # then: auto-posts each NEW message as it arrives
+uv run tiktok-agent --watch           # then: event-driven, auto-posts each NEW message the instant it arrives
 
 # One pass (also auto-posts queued messages by default)
 uv run tiktok-agent --once

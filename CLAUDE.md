@@ -40,8 +40,8 @@ uv sync
 
 # Console scripts (defined in pyproject.toml [project.scripts]):
 uv run tiktok-agent --catch-up     # drain current backlog WITHOUT posting (run once first)
-uv run tiktok-agent --watch        # poll loop, auto-posts each NEW message (default interval 60s)
-uv run tiktok-agent --once         # single poll cycle
+uv run tiktok-agent --watch        # event-driven: stays subscribed, auto-posts each message instantly
+uv run tiktok-agent --once         # drain the current backlog once and exit
 uv run tiktok-agent --watch --no-auto-post   # push to phone only, leave messages unacked
 uv run tiktok-agent --once --source imagekit # legacy: poll the ImageKit folder instead
 uv run tiktok-hivemq                         # inspect the HiveMQ queue (peek the backlog, no ack)
@@ -94,8 +94,8 @@ sequence. Each module is a single-responsibility seam with its own error type:
 
 | Module | Role | Error type |
 |--------|------|-----------|
-| `agent.py` | Orchestrator: poll → download → push → (auto-post) → report status. `process_once` dispatches to `_process_hivemq` (default) or `_process_imagekit` on `--source` | — |
-| `hivemq_source.py` | `list_pending()` (drain) + `update_status()` (publish + ack) + `close()` over MQTT (paho, persistent QoS-1 session) | `HiveMQSourceError` |
+| `agent.py` | Orchestrator: receive/drain → download → push → (auto-post) → report status. `--watch` calls `_watch_hivemq` (event-driven); `--once`/`process_once` dispatch `_process_hivemq` (drain) or `_process_imagekit` on `--source` | — |
+| `hivemq_source.py` | `watch(handler)` (persistent push subscription) + `list_pending()`/`update_status()`/`close()` (one-shot drain), over MQTT (paho, persistent QoS-1 session) | `HiveMQSourceError` |
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
 | `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post | `TikTokPostError` |
@@ -107,28 +107,36 @@ shelling out itself. Touch device interaction there.
 
 ### State machine (dedup)
 
-**HiveMQ source (default):** the broker's persistent session is the dedup. A poll
-cycle = connect → `list_pending()` drains every queued QoS-1 message (publish
-order, oldest first) → process → ack the done ones → `close()` disconnects. The
-client uses `manual_ack=True`, so paho sends the PUBACK only when the agent calls
-`update_status()`. After acting on a message the agent calls `update_status()`:
+**HiveMQ source (default):** the broker's persistent session is the dedup. MQTT
+is push, so the two run modes differ:
+- **`--watch` → `watch(handler)` (event-driven, the normal mode):** holds one
+  persistent subscription and dispatches each message to a handler the instant it
+  arrives — **no poll interval**. `on_message` enqueues to a single worker thread
+  (so the network thread stays responsive for keepalive while a post runs); the
+  handler's return value drives the ack.
+- **`--once` / `--catch-up` → `list_pending()` (one-shot drain):** connect → drain
+  every queued QoS-1 message (publish order, oldest first) → process → ack the done
+  ones → `close()` disconnects. The drain ends after a short idle window
+  (`DRAIN_IDLE`, no new message for ~2s) capped by `DRAIN_HARD_CAP`.
+
+Both modes use `manual_ack=True`, so paho sends the PUBACK only when the agent
+calls `update_status()`. After acting on a message:
 - `post()` returns `"posted"` → publish `posted` + **ack** (message dropped)
 - `post()` returns `"needs_manual"`, raises, or `ImageURL` is empty → publish
   `failed` + **ack** (`failed` drops the message just like a "posted" ack so it
   won't loop; on `needs_manual` the composer is still open on the phone to finish
   by hand)
-- `--no-auto-post` → message is **never acked** (pushed to phone only); `close()`
-  releases it back to the broker, so it is redelivered on the next poll and
-  re-pushed until it is actually posted
+- `--no-auto-post` → message is **never acked** (pushed to phone only); on the next
+  reconnect the broker redelivers it, so it is re-pushed until it is actually posted
 
 There is **no local state file** in this mode (the broker holds the queue).
 Trade-off: a crash between a successful post and the ack leaves the message
-unacked, so it is redelivered and could be re-posted on the next poll.
+unacked, so it is redelivered and could be re-posted later.
 
-The drain ends after a short idle window (`DRAIN_IDLE`, no new message for ~2s)
-capped by `DRAIN_HARD_CAP`. The persistent client is a module-level singleton in
-`hivemq_source.py`; `_process_hivemq` and `_catch_up_hivemq` wrap their work in
-`try/finally: close()` so each poll cycle is a clean connect/disconnect.
+The persistent client is a module-level singleton in `hivemq_source.py`;
+`_process_hivemq`/`_catch_up_hivemq` wrap their drain in `try/finally: close()`,
+and `watch()` does the same around its blocking loop, so every run ends with a
+clean disconnect.
 
 `--catch-up` drains every queued message and marks it `posted` (publish + ack)
 without posting. **Run it once before the first `--watch`** — auto-post is ON by

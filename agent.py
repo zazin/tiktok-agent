@@ -169,6 +169,57 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) ->
         close()
 
 
+def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) -> None:
+    """Event-driven watch: react to each HiveMQ message the instant it arrives.
+
+    Unlike the --once drain, this holds a persistent subscription (no poll
+    interval) and dispatches each message to a handler that downloads, pushes, and
+    (optionally) posts it. The handler's return value tells hivemq_source whether
+    to publish a status + ack the message.
+    """
+    from hivemq_source import watch, HiveMQSourceError
+    from imagekit_source import download, ImageKitSourceError
+    from adb_pusher import push_to_phone, PhonePushError
+    from tiktok_poster import post, TikTokPostError
+
+    def handler(rec: dict) -> Optional[str]:
+        rec_id = rec.get("id")
+        fields = rec.get("fields") or {}
+        url = fields.get("ImageURL")
+        name = fields.get("ImagePath") or (url.rsplit("/", 1)[-1] if url else None) or f"{rec_id}.jpg"
+        _log(f"Message {rec_id}")
+        if not url:
+            _log(f"  SKIP {rec_id}: no ImageURL")
+            return "failed"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                local = download(url, Path(tmp) / name)
+                remote = push_to_phone(str(local), dest_dir=dest_dir, serial=serial)
+                _log(f"  pushed {name} -> {remote}")
+                if not auto_post:
+                    _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
+                    return None
+                status = post(
+                    remote,
+                    caption=fields.get("Caption"),
+                    description=fields.get("Description"),
+                    serial=serial,
+                    auto_post=True,
+                )
+                _log(f"  tiktok: {status}")
+                return "posted" if status == "posted" else "failed"
+        except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
+            _log(f"  FAILED {name}: {e}")
+            return "failed"
+
+    _log("Watching HiveMQ topic (event-driven, push; Ctrl-C to stop)...")
+    try:
+        watch(handler)
+    except HiveMQSourceError as e:
+        _log(f"Watch failed: {e}")
+    _log("Stopped.")
+
+
 def _process_imagekit(
     *,
     folder: str,
@@ -306,14 +357,14 @@ def _cli() -> int:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Process new images once and exit (default)")
-    mode.add_argument("--watch", action="store_true", help="Keep polling on an interval until interrupted")
+    mode.add_argument("--watch", action="store_true", help="Keep running until interrupted (hivemq: event-driven push; imagekit: poll on --interval)")
     parser.add_argument(
         "--source",
         choices=("hivemq", "imagekit"),
         default=DEFAULT_SOURCE,
         help=f"Work queue to read from (default: {DEFAULT_SOURCE})",
     )
-    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"Watch poll interval in seconds (default: {DEFAULT_INTERVAL})")
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help=f"Watch poll interval in seconds (imagekit source only; default: {DEFAULT_INTERVAL})")
     parser.add_argument("--folder", default=DEFAULT_FOLDER, help=f"ImageKit folder to watch (imagekit source only; default: {DEFAULT_FOLDER})")
     parser.add_argument("--state", default=DEFAULT_STATE, help=f"Path to the processed-state JSON (imagekit source only; default: {DEFAULT_STATE})")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
@@ -347,8 +398,12 @@ def _cli() -> int:
     )
 
     if args.watch:
-        where = args.folder if args.source == "imagekit" else "HiveMQ"
-        _log(f"Watching {where} every {args.interval}s (Ctrl-C to stop)...")
+        if args.source == "hivemq":
+            # MQTT is push: hold a persistent subscription and react instantly.
+            # No --interval (that only applies to the imagekit folder poll).
+            _watch_hivemq(serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest)
+            return 0
+        _log(f"Watching {args.folder} every {args.interval}s (Ctrl-C to stop)...")
         try:
             while True:
                 process_once(**kw)
