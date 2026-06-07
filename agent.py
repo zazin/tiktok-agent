@@ -103,7 +103,7 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) ->
     Drains the backlog, posts each message, and acks (via update_status) only the
     ones that reach a terminal state. Unacked messages (the --no-auto-post path,
     or a crash) are released back to the broker by close() and redelivered next
-    poll — the MQTT equivalent of leaving an Airtable row "pending".
+    poll, so they are effectively left pending until actually posted.
     """
     from hivemq_source import list_pending, update_status, close, HiveMQSourceError
     from imagekit_source import download, ImageKitSourceError

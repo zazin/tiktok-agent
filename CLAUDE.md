@@ -15,7 +15,7 @@ auto-posts it to TikTok by driving the on-device UI over adb → publishes the
 outcome (`posted`/`failed`) to a status topic and **acks** the message.
 
 **HiveMQ is the queue / source of truth.** There is no server, database, or
-Airtable table between the two halves — the agent discovers work by draining the
+table between the two halves — the agent discovers work by draining the
 work topic and reports back by publishing to the status topic. Queue durability
 comes from a **persistent QoS-1 MQTT session** (stable client-id,
 `clean_session=False`): the broker queues messages while the device is offline and

@@ -7,16 +7,15 @@ The tiktok-pipeline publishes one MQTT message per generated post to a work topi
 ImageKit image URL. This module subscribes to that topic (the queue) and reports
 each post's outcome by publishing to a status topic (default "tiktok/status").
 
-The semantic bridge from a durable Airtable table to fire-and-forget pub/sub is a
-**persistent session + QoS 1 + manual acknowledgement**:
+A durable, at-least-once work queue on top of fire-and-forget pub/sub is built
+from a **persistent session + QoS 1 + manual acknowledgement**:
 
   - The client uses a stable client-id and ``clean_session=False``, so the broker
     queues messages while the device is offline and redelivers them on reconnect.
   - Each message is QoS 1 and is **acked only after** the agent reports a terminal
     status (``posted``/``failed``) via ``update_status``. Anything still unacked
     (the ``--no-auto-post`` path, or a crash before the post finishes) is
-    redelivered on the next connect — the MQTT equivalent of an Airtable row left
-    ``pending``.
+    redelivered on the next connect, so it stays pending until actually posted.
 
 A poll cycle = one connect → drain queued messages → process → ack the done ones →
 disconnect (via ``close()``). Disconnecting releases the unacked messages back to
@@ -268,9 +267,9 @@ def update_status(record_id: str, status: str, *, timeout: float = 10.0) -> None
     Report a post's outcome: publish {id, status, ts} to the status topic and ack
     the corresponding work message (so the broker won't redeliver it).
 
-    Both "posted" and "failed" ack-drop the message (mirroring Airtable, where a
-    "failed" row also leaves the pending query). A message whose id is unknown
-    here (already acked, or from a previous session) is published-only.
+    Both "posted" and "failed" ack-drop the message (a terminal "failed" should
+    not loop forever). A message whose id is unknown here (already acked, or from
+    a previous session) is published-only.
 
     Raises:
         HiveMQSourceError: If not connected or the publish fails.
