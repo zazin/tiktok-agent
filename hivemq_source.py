@@ -140,8 +140,18 @@ def _on_connect(client, userdata, flags, reason_code, properties) -> None:
     _connected.set()
 
 
+def _log_received(message) -> None:
+    """Always log every message the moment it arrives, before any validation."""
+    body = message.payload[:1000].decode("utf-8", "replace")
+    print(
+        f"hivemq: received on {message.topic!r} (qos={message.qos}, {len(message.payload)} bytes): {body}",
+        flush=True,
+    )
+
+
 def _on_message(client, userdata, message) -> None:
     global _last_rx
+    _log_received(message)
     with _lock:
         _buffer.append(message)
         _last_rx = time.monotonic()
@@ -214,16 +224,36 @@ def _drain(*, idle: float = DRAIN_IDLE, hard_cap: float = DRAIN_HARD_CAP) -> lis
     return msgs
 
 
+def _warn(reason: str, message: mqtt.MQTTMessage) -> None:
+    """Log (to stderr) a malformed message that is about to be acked + dropped."""
+    snippet = message.payload[:200].decode("utf-8", "replace")
+    print(
+        f"hivemq: dropping message on {message.topic!r}: {reason} — {snippet}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _parse(message: mqtt.MQTTMessage) -> Optional[dict]:
-    """Parse a work message into a {id, fields} record, or None if invalid."""
+    """Parse a work message into a {id, fields} record, or None if invalid.
+
+    A None return means the message failed validation and will be acked + dropped;
+    the reason is logged via _warn so silent loss is debuggable.
+    """
     try:
         payload = json.loads(message.payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        _warn(f"invalid JSON ({e})", message)
         return None
     if not isinstance(payload, dict):
+        _warn("payload is not a JSON object", message)
         return None
     rec_id = payload.get("id")
-    if not rec_id or not payload.get("ImageURL"):
+    if not rec_id:
+        _warn("missing required 'id' field", message)
+        return None
+    if not payload.get("ImageURL"):
+        _warn(f"missing 'ImageURL' (id={rec_id})", message)
         return None
     return {
         "id": str(rec_id),
@@ -355,6 +385,7 @@ def watch(handler: Callable[[dict], Optional[str]]) -> None:
         _connected.set()
 
     def on_message(client, userdata, message) -> None:
+        _log_received(message)
         rec = _parse(message)
         if rec is None:
             client.ack(message.mid, message.qos)  # drop malformed
