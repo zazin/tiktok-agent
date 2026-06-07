@@ -6,7 +6,8 @@ ImageKit access — image download (both sources) + the legacy folder queue.
 CDN URL (no auth). `list_images()` powers the legacy `--source imagekit` queue:
 it lists an ImageKit folder via the Media Management API so the tiktok-agent can
 discover images the tiktok-pipeline uploaded. The default source of truth is now
-Airtable (see airtable_source.py); this folder listing is the legacy fallback.
+the HiveMQ work topic (see hivemq_source.py); this folder listing is the legacy
+fallback.
 
 Auth uses the SAME scheme as the pipeline's uploader: HTTP Basic with the
 private key as username and an empty password.

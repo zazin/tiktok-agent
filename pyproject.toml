@@ -1,15 +1,15 @@
 [project]
 name = "tiktok-agent"
 version = "0.1.0"
-description = "Poll the Airtable Posts queue, push each pending image to a connected Android phone over adb, and auto-post it to TikTok."
+description = "Drain the HiveMQ work queue, push each pending image to a connected Android phone over adb, and auto-post it to TikTok."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["paho-mqtt>=2.0"]
 
 [project.scripts]
 tiktok-agent = "agent:_cli"
 tiktok-source = "imagekit_source:_cli"
-tiktok-airtable = "airtable_source:_cli"
+tiktok-hivemq = "hivemq_source:_cli"
 tiktok-post = "tiktok_poster:_cli"
 
 [tool.uv]
@@ -23,7 +23,7 @@ build-backend = "hatchling.build"
 include = [
     "agent.py",
     "imagekit_source.py",
-    "airtable_source.py",
+    "hivemq_source.py",
     "adb_pusher.py",
     "tiktok_poster.py",
     "env_loader.py",
