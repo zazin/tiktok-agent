@@ -58,7 +58,11 @@ COMMENT_INPUT_HINTS = (
     "Say something nice",
 )
 
-# The submit control (often an icon → matched on text AND content-desc).
+# The submit control. On some builds it has a real label ("Post"/"Kirim"); on
+# others its content-desc is an UNTRANSLATED resource reference (e.g. "@2131888575")
+# that no label can match — so the send button is also located positionally
+# (the rightmost tappable control in the toolbar just below the input field).
+# See _find_send_button.
 COMMENT_SEND_LABELS = ("Post", "Send", "Kirim", "Posting")
 
 # Per-step pacing: how long to wait for a screen, and retries while it loads.
@@ -136,6 +140,85 @@ def _find_partial(xml: str, substrings: tuple[str, ...]) -> Optional[tuple[int, 
             if center:
                 return center
     return None
+
+
+def _bounds_of(bounds: str) -> Optional[tuple[int, int, int, int]]:
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if not m:
+        return None
+    return tuple(int(v) for v in m.groups())  # type: ignore[return-value]
+
+
+def _find_send_button(xml: str) -> Optional[tuple[int, int]]:
+    """Locate the comment 'send' control.
+
+    First tries an exact label (COMMENT_SEND_LABELS) for builds that expose one.
+    Otherwise falls back to geometry: TikTok's send button often has an
+    untranslated `@<digits>` content-desc, so we find the composing input field
+    (an EditText whose text is non-empty and not the placeholder hint) and pick the
+    rightmost clickable control sitting in the toolbar band just below it.
+    """
+    labelled = _find_tappable(xml, COMMENT_SEND_LABELS)
+    if labelled:
+        return labelled
+
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+
+    hints = {h.lower() for h in COMMENT_INPUT_HINTS}
+    input_box: Optional[tuple[int, int, int, int]] = None
+    for node in root.iter("node"):
+        if not node.get("class", "").endswith("EditText"):
+            continue
+        text = (node.get("text") or "").strip()
+        if text and text.lower() not in hints:  # the field we just typed into
+            b = _bounds_of(node.get("bounds", ""))
+            if b:
+                input_box = b
+                break
+    if input_box is None:
+        return None
+
+    # A uiautomator dump can contain the compose overlay AND the video screen
+    # behind it, so "rightmost clickable" alone snags a background nav button. The
+    # send button is distinguished by an untranslated `@<digits>` content-desc
+    # (this build) — background controls carry real labels — so match on that,
+    # constrained to the toolbar band beside/below the composing input.
+    ix1, iy1, ix2, iy2 = input_box
+    input_mid_x = (ix1 + ix2) // 2
+    band_top, band_bottom = iy1, iy2 + 250
+    best: Optional[tuple[int, int]] = None
+    for node in root.iter("node"):
+        desc = (node.get("content-desc") or "").strip()
+        if not re.fullmatch(r"@\d+", desc):  # untranslated resource ref = send btn
+            continue
+        c = _center_of_bounds(node.get("bounds", ""))
+        if not c:
+            continue
+        cx, cy = c
+        if band_top <= cy <= band_bottom and cx > input_mid_x:
+            if best is None or cx > best[0]:  # rightmost in-band match
+                best = c
+    return best
+
+
+def _wait_and_tap_send(
+    serial: Optional[str],
+    *,
+    retries: int = STEP_RETRIES,
+    delay: float = STEP_DELAY,
+) -> bool:
+    """Poll for the send button (label or positional) and tap it. True if tapped."""
+    for _ in range(retries):
+        target = _find_send_button(_dump_ui(serial))
+        if target:
+            _tap(serial, *target)
+            time.sleep(delay)
+            return True
+        time.sleep(delay)
+    return False
 
 
 def _tap(serial: Optional[str], x: int, y: int) -> None:
@@ -274,7 +357,7 @@ def comment_on_post(
     _input_line(text, serial)
     time.sleep(0.5)
 
-    if not _wait_and_tap(COMMENT_SEND_LABELS, serial):
+    if not _wait_and_tap_send(serial):
         return "needs_manual"
 
     # Dismiss the keyboard so the next run starts from a clean screen.
