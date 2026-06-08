@@ -1,6 +1,6 @@
 [project]
 name = "tiktok-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "Drain the HiveMQ work queue, push each pending image to a connected Android phone over adb, and auto-post it to TikTok."
 readme = "README.md"
 requires-python = ">=3.10"
