@@ -27,6 +27,10 @@ The pipeline publishes one **QoS-1, retained-false** JSON message per post to th
 
 `id` is the required correlation key. The agent reports back on the status topic with `{"id": "...", "status": "posted"|"failed", "ts": <unix>}`.
 
+> **Publishing from another backend?** See [`docs/`](docs/) for the full MQTT
+> contract reference — connection/auth, both work topics (`tiktok/posts` and
+> `tiktok/comments`), exact field schemas, status messages, and QoS/ack semantics.
+
 ## Files
 
 | File | Purpose |
