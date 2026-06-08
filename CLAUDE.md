@@ -48,6 +48,11 @@ uv run tiktok-hivemq                         # inspect the HiveMQ queue (peek th
 uv run tiktok-source --folder /tiktok        # inspect the legacy ImageKit queue
 uv run tiktok-post --list                    # list images already on the phone
 uv run tiktok-post /sdcard/Pictures/x.jpg --auto-post --from-imagekit   # post an on-phone image
+
+# Comment-on-post (independent of the posting agent; see "Comment-on-post" below):
+uv run tiktok-commenter --catch-up                 # drain the comment backlog WITHOUT commenting (run once first)
+uv run tiktok-commenter --watch                    # event-driven: comment on each tiktok/comments message instantly
+uv run tiktok-commenter --once --dry-run           # drain once, log what it would comment, DON'T submit
 ```
 
 There are **no tests, linter, or build step** configured. The wheel `include`
@@ -67,6 +72,11 @@ HIVEMQ_PORT=8883                      # optional, defaults to 8883 (TLS)
 HIVEMQ_TOPIC=tiktok/posts             # optional, work topic to drain
 HIVEMQ_STATUS_TOPIC=tiktok/status     # optional, where outcomes are published
 HIVEMQ_CLIENT_ID=tiktok-agent         # optional, stable id → persistent session
+
+# Comment-on-post (tiktok-commenter) — reuses the HiveMQ creds above
+HIVEMQ_COMMENT_TOPIC=tiktok/comments          # optional, comment work topic to drain
+HIVEMQ_COMMENT_STATUS_TOPIC=tiktok/comment-status  # optional, where comment outcomes are published
+HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter     # optional, stable id → its own persistent session
 
 # ImageKit — still needed to download images (and for --source imagekit)
 IMAGEKIT_PRIVATE_KEY=private_...
@@ -101,9 +111,20 @@ sequence. Each module is a single-responsibility seam with its own error type:
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post | `TikTokPostError` |
 | `env_loader.py` | Zero-dep `.env` loader | — |
 
+The **comment-on-post** feature is a second, independent consumer (its own
+orchestrator + console script `tiktok-commenter`, its own HiveMQ topic / client-id;
+no image handling, no AI):
+
+| Module | Role | Error type |
+|--------|------|-----------|
+| `comment_agent.py` | Orchestrator + CLI: drain the comment topic → open post by URL → submit comment → report status. `--watch` (event-driven) / `--once` / `--catch-up` | — |
+| `comment_source.py` | Self-contained mirror of `hivemq_source.py` for the comment topic (own topic/client-id/status, `PostURL`+`Comment` parse, persistent QoS-1 session) | `HiveMQSourceError` (reused) |
+| `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment | `TikTokCommentError` |
+
 `run_adb()` in `adb_pusher.py` is the single chokepoint for **all** adb calls
-(push, shell, intents, UI dumps, taps) — `tiktok_poster.py` imports it rather than
-shelling out itself. Touch device interaction there.
+(push, shell, intents, UI dumps, taps) — `tiktok_poster.py` and
+`tiktok_commenter.py` import it rather than shelling out themselves. Touch device
+interaction there.
 
 ### State machine (dedup)
 
@@ -186,6 +207,43 @@ become `KEYCODE_ENTER`. The full emoji caption still lives in the published
 message. (Note: the pipeline does **not** store hashtags — captions/descriptions
 are hashtag-free.)
 
+### Comment-on-post (`tiktok-commenter`, the other brittle part)
+
+A second, independent consumer that **leaves a comment on an existing TikTok
+post** — triggered by HiveMQ exactly like the poster, but on its **own topic**
+(`tiktok/comments`, env `HIVEMQ_COMMENT_TOPIC`) drained by its **own persistent
+session** (`HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter`, so it runs as a separate
+process and never collides with `tiktok-agent`'s session). No image handling, no
+AI — the exact comment text is in the message.
+
+- **Message contract:** `{"PostURL": "...", "Comment": "..."}` — **no `id`, no
+  `CreatedAt`.** MQTT acking uses the message's `mid`, not the payload, so no `id`
+  is needed; status is keyed by `PostURL`. `_parse` drops + logs any message
+  missing a non-empty `PostURL` or `Comment`.
+- **Flow (`comment_agent.py` → `tiktok_commenter.comment_on_post`):** deep-link
+  open the post (`am start -a android.intent.action.VIEW -d <url> -p <pkg>`, the
+  reliable part) → tap the comment icon (its content-desc embeds a live count, so
+  matched by **substring** via `_find_partial`/`_wait_and_tap_partial`) → focus the
+  input field → type → tap send → dismiss the keyboard.
+- **Statuses (all ack-drop so a stuck UI doesn't loop):** `commented` (success),
+  `needs_manual` (an unrecognized screen — stop, don't tap blindly),
+  `skipped_non_ascii` (nothing typeable after stripping — not submitted),
+  `failed` (open/adb error). `--dry-run` opens + focuses the input and logs the
+  comment but **never submits** and leaves the message unacked.
+- **Same brittleness + defensiveness as the poster:** the UI labels live in the
+  constants block at the top of `tiktok_commenter.py` (`COMMENT_OPEN_SUBSTRINGS`,
+  `COMMENT_INPUT_HINTS`, `COMMENT_SEND_LABELS`, `STEP_DELAY`, `STEP_RETRIES`) —
+  **guesses that must be calibrated on-device against a real `uiautomator dump`.**
+  The low-level UI helpers (`_dump_ui`, `_find_tappable`, `_input_line`, …) are
+  intentionally **copied** from `tiktok_poster.py` (no shared util module), and
+  `comment_source.py` likewise duplicates `hivemq_source.py`'s MQTT plumbing so the
+  working poster consumer stays untouched.
+- **ASCII limit (same as captions):** `adb input text` can't type non-ASCII/emoji;
+  a comment with nothing typeable after stripping is **not** submitted
+  (`skipped_non_ascii`). Realistic scope is Latin-script languages.
+- **`--catch-up`:** drains the comment backlog and marks each `commented` (publish
+  + ack) **without commenting** — run once before the first `--watch`.
+
 ## Cross-repo coupling (easy to break)
 
 - **MQTT message contract (primary):** the pipeline publishes (QoS 1, retained
@@ -196,6 +254,12 @@ are hashtag-free.)
   names (`HIVEMQ_TOPIC` / `HIVEMQ_STATUS_TOPIC`) and the QoS-1/persistent-session
   semantics. Renaming a field, changing the topics, or dropping to QoS 0 silently
   breaks the agent.
+- **Comment message contract (`tiktok-commenter`):** a producer publishes (QoS 1,
+  retained false) JSON `{"PostURL": "https://www.tiktok.com/@u/video/<id>",
+  "Comment": "..."}` to `tiktok/comments` (`HIVEMQ_COMMENT_TOPIC`); the agent
+  reports `{PostURL, status, ts}` on `tiktok/comment-status`
+  (`HIVEMQ_COMMENT_STATUS_TOPIC`). No `id` field. Renaming a field, changing the
+  topic, or dropping to QoS 0 silently breaks the consumer.
 - **ImageKit `ImageURL`:** the agent downloads the image from the public CDN URL the
   pipeline put in each message.
 - **Legacy ImageKit coupling (`--source imagekit` only):** filename convention

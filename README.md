@@ -36,6 +36,9 @@ The pipeline publishes one **QoS-1, retained-false** JSON message per post to th
 | `imagekit_source.py` | `download()` images (used by both sources) + list the ImageKit folder (legacy queue) |
 | `adb_pusher.py` | Push an image to the phone gallery over adb (+ media scan) |
 | `tiktok_poster.py` | Best-effort auto-post via adb UI automation (also the `tiktok-post` CLI) |
+| `comment_agent.py` | Comment-on-post orchestrator + `tiktok-commenter` CLI (independent of posting) |
+| `comment_source.py` | Drain the comment topic + publish/ack comment outcomes over MQTT (mirror of `hivemq_source.py`) |
+| `tiktok_commenter.py` | adb UI automation to open a post by URL and submit a comment |
 | `env_loader.py` | Zero-dependency `.env` loader |
 | `agent_state.json` | Local record of processed `fileId`s — **`--source imagekit` only**, gitignored |
 
@@ -127,3 +130,46 @@ Auto-post is **on by default** and **publishes real public posts** to the logged
 Use `--no-auto-post` (agent) or omit `--auto-post` (tiktok-post) to only open the composer / push to the gallery and finish manually. Button labels and the package name are constants at the top of `tiktok_poster.py` — tune them when TikTok's UI shifts.
 
 Use `--auto-post` at your own risk.
+
+## Comment on a post (`tiktok-commenter`)
+
+A separate, independent capability: **leave a comment on an existing TikTok post**.
+It is triggered by HiveMQ just like the poster, but on its **own topic**
+(`tiktok/comments`) drained by its **own persistent session**, so it runs as a
+separate process alongside `tiktok-agent`. There is **no AI** — the exact comment
+text comes in the message.
+
+Each message is QoS-1 JSON with just two fields (no `id`):
+
+```json
+{"PostURL": "https://www.tiktok.com/@captgani/video/7648864421841816852",
+ "Comment": "Nice video!"}
+```
+
+For each message the agent opens the post by URL over adb, opens the comment sheet,
+types the comment, and submits it — then reports `{PostURL, status, ts}` on
+`tiktok/comment-status` and acks the message.
+
+```bash
+# .env (reuses the HiveMQ creds; all three optional with the defaults shown):
+#   HIVEMQ_COMMENT_TOPIC=tiktok/comments
+#   HIVEMQ_COMMENT_STATUS_TOPIC=tiktok/comment-status
+#   HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter
+
+uv run tiktok-commenter --catch-up          # first: drain the existing backlog WITHOUT commenting (skip it)
+uv run tiktok-commenter --watch             # then: event-driven, comments on each NEW message instantly
+uv run tiktok-commenter --once              # drain the current backlog once and exit
+uv run tiktok-commenter --once --dry-run    # open posts + log the comment, but DON'T submit (use while tuning)
+```
+
+Statuses (all drop the message so it won't loop): `commented`, `needs_manual` (an
+unrecognized screen — it stops rather than tap blindly), `skipped_non_ascii`
+(nothing typeable after stripping emoji/non-ASCII — `adb input text` can't enter
+those), `failed`.
+
+**Same brittleness caveat as auto-post:** opening the post by deep-link is reliable,
+but finding the comment icon → input → send depends on TikTok's current UI. Those
+labels are constants at the top of `tiktok_commenter.py`
+(`COMMENT_OPEN_SUBSTRINGS`, `COMMENT_INPUT_HINTS`, `COMMENT_SEND_LABELS`) and must
+be calibrated on-device against a real `uiautomator dump` — run `--dry-run` first
+and tune. Use at your own risk (UI automation may be against TikTok's ToS).

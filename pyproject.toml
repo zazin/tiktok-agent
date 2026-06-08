@@ -11,6 +11,7 @@ tiktok-agent = "agent:_cli"
 tiktok-source = "imagekit_source:_cli"
 tiktok-hivemq = "hivemq_source:_cli"
 tiktok-post = "tiktok_poster:_cli"
+tiktok-commenter = "comment_agent:_cli"
 
 [tool.uv]
 package = true
@@ -26,5 +27,8 @@ include = [
     "hivemq_source.py",
     "adb_pusher.py",
     "tiktok_poster.py",
+    "tiktok_commenter.py",
+    "comment_source.py",
+    "comment_agent.py",
     "env_loader.py",
 ]
