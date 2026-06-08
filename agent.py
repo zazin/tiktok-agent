@@ -356,8 +356,8 @@ def _cli() -> int:
         description="Poll the work queue, push new images to a connected phone, and auto-post them to TikTok."
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--once", action="store_true", help="Process new images once and exit (default)")
-    mode.add_argument("--watch", action="store_true", help="Keep running until interrupted (hivemq: event-driven push; imagekit: poll on --interval)")
+    mode.add_argument("-o", "--once", action="store_true", help="Process new images once and exit (default)")
+    mode.add_argument("-w", "--watch", action="store_true", help="Keep running until interrupted (hivemq: event-driven push; imagekit: poll on --interval)")
     parser.add_argument(
         "--source",
         choices=("hivemq", "imagekit"),

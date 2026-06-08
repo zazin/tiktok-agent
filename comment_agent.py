@@ -147,8 +147,8 @@ def _cli() -> int:
         description="Drain the HiveMQ comment queue and comment on each TikTok post over adb."
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--once", action="store_true", help="Drain the current backlog once and exit (default)")
-    mode.add_argument("--watch", action="store_true", help="Event-driven: stay subscribed and comment on each message instantly")
+    mode.add_argument("-o", "--once", action="store_true", help="Drain the current backlog once and exit (default)")
+    mode.add_argument("-w", "--watch", action="store_true", help="Event-driven: stay subscribed and comment on each message instantly")
     parser.add_argument(
         "--catch-up",
         action="store_true",
