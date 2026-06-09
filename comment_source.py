@@ -17,9 +17,11 @@ manual acknowledgement. A message is acked only after the agent reports a termin
 status via update_status; anything unacked is redelivered on reconnect.
 
 Message contract (published by the producer, QoS 1, retained false):
-  {"PostURL": "https://www.tiktok.com/@u/video/123", "Comment": "Nice!"}
+  {"PostURL": "https://www.tiktok.com/@u/video/123", "Comment": "Nice!",
+   "Account": "@handle"}
 There is NO id field — MQTT acking uses the message's mid, and status is keyed by
-PostURL.
+PostURL. ``Account`` is optional — when set, the commenter switches to that TikTok
+account before commenting (see tiktok_profile.py).
 
 Credentials (read from the environment / .env):
   - HIVEMQ_HOST          Cluster host, e.g. xxxx.s1.eu.hivemq.cloud — required
@@ -29,6 +31,8 @@ Credentials (read from the environment / .env):
   - HIVEMQ_COMMENT_TOPIC         Work topic (default "tiktok/comments")
   - HIVEMQ_COMMENT_STATUS_TOPIC  Status topic (default "tiktok/comment-status")
   - HIVEMQ_COMMENT_CLIENT_ID     Stable client id (default "tiktok-commenter")
+  - HIVEMQ_TOPIC_PREFIX          Optional prefix prepended to the topics + client-id,
+                                 e.g. "test/" (for local testing isolation)
 """
 
 from __future__ import annotations
@@ -83,9 +87,13 @@ class _Config:
         self.port = int(os.getenv("HIVEMQ_PORT") or DEFAULT_PORT)
         self.username = username
         self.password = password
-        self.topic = os.getenv("HIVEMQ_COMMENT_TOPIC") or DEFAULT_TOPIC
-        self.status_topic = os.getenv("HIVEMQ_COMMENT_STATUS_TOPIC") or DEFAULT_STATUS_TOPIC
-        self.client_id = os.getenv("HIVEMQ_COMMENT_CLIENT_ID") or DEFAULT_CLIENT_ID
+        # HIVEMQ_TOPIC_PREFIX (e.g. "test/") is prepended verbatim to the topics AND
+        # the client-id, so a local test run uses a fully isolated queue + persistent
+        # session and never touches production. Unset/empty → production behavior.
+        prefix = os.getenv("HIVEMQ_TOPIC_PREFIX") or ""
+        self.topic = prefix + (os.getenv("HIVEMQ_COMMENT_TOPIC") or DEFAULT_TOPIC)
+        self.status_topic = prefix + (os.getenv("HIVEMQ_COMMENT_STATUS_TOPIC") or DEFAULT_STATUS_TOPIC)
+        self.client_id = prefix + (os.getenv("HIVEMQ_COMMENT_CLIENT_ID") or DEFAULT_CLIENT_ID)
 
 
 # ---- module-level persistent client state ------------------------------------
@@ -221,7 +229,8 @@ def _parse(message: mqtt.MQTTMessage) -> Optional[dict]:
     if not comment:
         _warn(f"missing required 'Comment' field (PostURL={post_url})", message)
         return None
-    return {"post_url": str(post_url), "comment": str(comment)}
+    account = payload.get("Account")  # optional target TikTok @handle
+    return {"post_url": str(post_url), "comment": str(comment), "account": account}
 
 
 def list_pending(*, timeout: float = DRAIN_HARD_CAP) -> list[dict]:

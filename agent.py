@@ -112,6 +112,7 @@ def _post_record(fields: dict, *, serial: Optional[str], auto_post: bool, dest_d
             description=fields.get("Description"),
             serial=serial,
             auto_post=True,
+            account=fields.get("Account"),  # switch to this @handle first (if set)
         )
         _log(f"  tiktok: {status}")
         return status

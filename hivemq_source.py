@@ -36,12 +36,16 @@ Credentials (read from the environment / .env):
   - HIVEMQ_TOPIC         Work topic to subscribe to (default "tiktok/posts")
   - HIVEMQ_STATUS_TOPIC  Topic to publish post outcomes to (default "tiktok/status")
   - HIVEMQ_CLIENT_ID     Stable client id → persistent session (default "tiktok-agent")
+  - HIVEMQ_TOPIC_PREFIX  Optional prefix prepended to the topics + client-id, e.g.
+                         "test/" → test/tiktok/posts (for local testing isolation)
 
 Message contract (published by the pipeline, QoS 1, retained false):
   {"id": "...", "Caption": "...", "Description": "...",
    "ImageURL": "https://ik.imagekit.io/.../x.jpg", "ImagePath": "x.jpg",
-   "CreatedAt": "2026-06-07T12:00:00Z"}
+   "CreatedAt": "2026-06-07T12:00:00Z", "Account": "@handle"}
 ``id`` is required and is the correlation key used when reporting status back.
+``Account`` is optional — when set, the agent switches to that TikTok account
+before posting (see tiktok_profile.py).
 
 Usage (CLI):
     python hivemq_source.py            # peek the current backlog (no ack)
@@ -111,9 +115,13 @@ class _Config:
         self.port = int(os.getenv("HIVEMQ_PORT") or DEFAULT_PORT)
         self.username = username
         self.password = password
-        self.topic = os.getenv("HIVEMQ_TOPIC") or DEFAULT_TOPIC
-        self.status_topic = os.getenv("HIVEMQ_STATUS_TOPIC") or DEFAULT_STATUS_TOPIC
-        self.client_id = os.getenv("HIVEMQ_CLIENT_ID") or DEFAULT_CLIENT_ID
+        # HIVEMQ_TOPIC_PREFIX (e.g. "test/") is prepended verbatim to the topics AND
+        # the client-id, so a local test run uses a fully isolated queue + persistent
+        # session and never touches production. Unset/empty → production behavior.
+        prefix = os.getenv("HIVEMQ_TOPIC_PREFIX") or ""
+        self.topic = prefix + (os.getenv("HIVEMQ_TOPIC") or DEFAULT_TOPIC)
+        self.status_topic = prefix + (os.getenv("HIVEMQ_STATUS_TOPIC") or DEFAULT_STATUS_TOPIC)
+        self.client_id = prefix + (os.getenv("HIVEMQ_CLIENT_ID") or DEFAULT_CLIENT_ID)
 
 
 # ---- module-level persistent client state ------------------------------------
@@ -263,6 +271,7 @@ def _parse(message: mqtt.MQTTMessage) -> Optional[dict]:
             "ImageURL": payload.get("ImageURL"),
             "ImagePath": payload.get("ImagePath"),
             "CreatedAt": payload.get("CreatedAt"),
+            "Account": payload.get("Account"),  # optional target TikTok @handle
         },
     }
 

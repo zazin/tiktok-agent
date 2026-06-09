@@ -80,6 +80,10 @@ HIVEMQ_COMMENT_TOPIC=tiktok/comments          # optional, comment work topic to 
 HIVEMQ_COMMENT_STATUS_TOPIC=tiktok/comment-status  # optional, where comment outcomes are published
 HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter     # optional, stable id → its own persistent session
 
+# Local testing isolation (both consumers) — prepended verbatim to every topic AND
+# client-id, so a test run uses a fully isolated queue + session. Unset in prod.
+HIVEMQ_TOPIC_PREFIX=test/             # optional, e.g. "test/" → test/tiktok/posts
+
 # ImageKit — still needed to download images (and for --source imagekit)
 IMAGEKIT_PRIVATE_KEY=private_...
 IMAGEKIT_URL_ENDPOINT=https://ik.imagekit.io/your_id
@@ -111,6 +115,7 @@ sequence. Each module is a single-responsibility seam with its own error type:
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
 | `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post | `TikTokPostError` |
+| `tiktok_profile.py` | Read the active TikTok account and switch to a target `@handle` before acting (shared by poster + commenter) | `TikTokProfileError` |
 | `local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
 | `env_loader.py` | Zero-dep `.env` loader | — |
 
@@ -146,11 +151,13 @@ is push, so the two run modes differ:
 Both modes use `manual_ack=True`, so paho sends the PUBACK only when the agent
 calls `update_status()`. After acting on a message:
 - `post()` returns `"posted"` → publish `posted` + **ack** (message dropped)
-- `post()` returns `"needs_manual"`/`"composer_open"` or raises → the message's spool
-  file is **kept** (its status recorded) and the broker message gets `failed` + **ack**
-  (`failed` drops the broker copy just like a "posted" ack so it won't loop; on
-  `needs_manual` the composer is still open on the phone to finish by hand). An empty
-  `ImageURL` is acked-and-dropped **without** spooling (nothing to retry without a URL).
+- `post()` returns `"needs_manual"`/`"composer_open"`/`"wrong_account"` or raises →
+  the message's spool file is **kept** (its status recorded) and the broker message
+  gets `failed` + **ack** (`failed` drops the broker copy just like a "posted" ack so
+  it won't loop; on `needs_manual` the composer is still open on the phone to finish
+  by hand; `wrong_account` means the target account couldn't be confirmed active so
+  **nothing was posted** — re-attempt with `--retry` once the account is switchable).
+  An empty `ImageURL` is acked-and-dropped **without** spooling (nothing to retry).
 - `--no-auto-post` → message is **never acked** (pushed to phone only); on the next
   reconnect the broker redelivers it, so it is re-pushed until it is actually posted
 
@@ -221,6 +228,34 @@ become `KEYCODE_ENTER`. The full emoji caption still lives in the published
 message. (Note: the pipeline does **not** store hashtags — captions/descriptions
 are hashtag-free.)
 
+### Multi-account (`tiktok_profile.py`, the third brittle part)
+
+One device, multiple TikTok accounts logged into the **in-app account switcher**.
+A message may carry an optional **`Account`** field (a TikTok `@handle`); when set,
+the poster/commenter makes that account active **before** acting. Both
+`tiktok_poster.post` and `tiktok_commenter.comment_on_post` call
+`tiktok_profile.ensure_account(account, ...)` first (the poster before opening the
+composer, the commenter before opening the post). The CLIs also accept `--account`.
+
+`ensure_account` opens the Profile tab and reads the active `@handle`; if it already
+matches (compared normalized — leading `@` stripped, lowercased) it returns,
+otherwise it opens the account switcher, taps the target row, and **re-reads to
+confirm**. If it can't confirm the target is active it raises `TikTokProfileError`,
+which the posters map to the status **`"wrong_account"`** — **nothing is posted /
+commented**, the spool file is kept, and the broker message is acked `failed` (so it
+doesn't loop). Re-attempt with `--retry` once the account is switchable.
+
+This is the **most fragile** flow (TikTok A/B-tests the profile header heavily). Its
+UI selectors live in the constants block at the top of `tiktok_profile.py`
+(`PROFILE_TAB_LABELS`, `SWITCH_OPEN_LABELS`, `HANDLE_RE`, `STEP_DELAY`,
+`STEP_RETRIES`) — **guesses that must be calibrated on-device** against a real
+`uiautomator dump` of the Profile tab and the open account-switcher sheet. Use
+`uv run tiktok-profile` (no arg = print the current `@handle`; `tiktok-profile
+@target` = switch) to calibrate in isolation. The low-level UI helpers are
+**copied** from `tiktok_poster.py`, following the per-feature-duplication pattern;
+unlike them this one module is **shared** by both consumers (the account check is
+identical). It fails *safe*: an unconfirmed account never posts to the wrong one.
+
 ### Comment-on-post (`tiktok-commenter`, the other brittle part)
 
 A second, independent consumer that **leaves a comment on an existing TikTok
@@ -230,10 +265,11 @@ session** (`HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter`, so it runs as a separate
 process and never collides with `tiktok-agent`'s session). No image handling, no
 AI — the exact comment text is in the message.
 
-- **Message contract:** `{"PostURL": "...", "Comment": "..."}` — **no `id`, no
-  `CreatedAt`.** MQTT acking uses the message's `mid`, not the payload, so no `id`
-  is needed; status is keyed by `PostURL`. `_parse` drops + logs any message
-  missing a non-empty `PostURL` or `Comment`.
+- **Message contract:** `{"PostURL": "...", "Comment": "...", "Account": "@handle"}`
+  — **no `id`, no `CreatedAt`.** MQTT acking uses the message's `mid`, not the
+  payload, so no `id` is needed; status is keyed by `PostURL`. `Account` is optional
+  (switch to that TikTok account first, see Multi-account above). `_parse` drops +
+  logs any message missing a non-empty `PostURL` or `Comment`.
 - **Flow (`comment_agent.py` → `tiktok_commenter.comment_on_post`):** deep-link
   open the post (`am start -a android.intent.action.VIEW -d <url> -p <pkg>`, the
   reliable part) → tap the comment icon (its content-desc embeds a live count, so
@@ -242,13 +278,16 @@ AI — the exact comment text is in the message.
 - **Statuses (all ack-drop so a stuck UI doesn't loop):** `commented` (success),
   `needs_manual` (an unrecognized screen — stop, don't tap blindly),
   `skipped_non_ascii` (nothing typeable after stripping — not submitted),
+  `wrong_account` (target `Account` couldn't be confirmed active — not submitted),
   `failed` (open/adb error). `--dry-run` opens + focuses the input and logs the
   comment but **never submits** and leaves the message unacked.
 - **Local spool dir (mirrors the poster):** every received comment is mirrored to its
   own JSON file in `queue_comments/` on receive (keyed by `PostURL`, payload
-  `{post_url, comment}`, via the shared `local_store.py`), before the phone is touched.
+  `{post_url, comment, account}`, via the shared `local_store.py`), before the phone is
+  touched.
   Terminal outcomes delete the file — `commented` (success) **and** `skipped_non_ascii`
-  (can never be typed, so retrying is pointless); `needs_manual`/`failed` keep it.
+  (can never be typed, so retrying is pointless); `needs_manual`/`failed`/`wrong_account`
+  keep it.
   `--dry-run` does **not** spool. `tiktok-commenter --retry` re-attempts each surviving
   file locally (no HiveMQ). Override the dir with `--store-dir`.
 - **Same brittleness + defensiveness as the poster:** the UI labels live in the
@@ -269,18 +308,21 @@ AI — the exact comment text is in the message.
 
 - **MQTT message contract (primary):** the pipeline publishes (QoS 1, retained
   false) and the agent drains JSON messages on the work topic with fields `id`,
-  `Caption`, `Description`, `ImageURL`, `ImagePath`, `CreatedAt`. `id` is the
-  required correlation key echoed back in status messages
-  (`{id, status, ts}` on the status topic). Both sides must agree on the topic
-  names (`HIVEMQ_TOPIC` / `HIVEMQ_STATUS_TOPIC`) and the QoS-1/persistent-session
-  semantics. Renaming a field, changing the topics, or dropping to QoS 0 silently
-  breaks the agent.
+  `Caption`, `Description`, `ImageURL`, `ImagePath`, `CreatedAt`, and optional
+  `Account` (a TikTok `@handle` to post as). `id` is the required correlation key
+  echoed back in status messages (`{id, status, ts}` on the status topic). Both
+  sides must agree on the topic names (`HIVEMQ_TOPIC` / `HIVEMQ_STATUS_TOPIC`) and
+  the QoS-1/persistent-session semantics. Renaming a field, changing the topics, or
+  dropping to QoS 0 silently breaks the agent. (`HIVEMQ_TOPIC_PREFIX` prepends a
+  prefix to the topics + client-id for local-test isolation — keep it unset in prod
+  on both repos.)
 - **Comment message contract (`tiktok-commenter`):** a producer publishes (QoS 1,
   retained false) JSON `{"PostURL": "https://www.tiktok.com/@u/video/<id>",
-  "Comment": "..."}` to `tiktok/comments` (`HIVEMQ_COMMENT_TOPIC`); the agent
-  reports `{PostURL, status, ts}` on `tiktok/comment-status`
-  (`HIVEMQ_COMMENT_STATUS_TOPIC`). No `id` field. Renaming a field, changing the
-  topic, or dropping to QoS 0 silently breaks the consumer.
+  "Comment": "...", "Account": "@handle"}` to `tiktok/comments`
+  (`HIVEMQ_COMMENT_TOPIC`); the agent reports `{PostURL, status, ts}` on
+  `tiktok/comment-status` (`HIVEMQ_COMMENT_STATUS_TOPIC`). No `id` field; `Account`
+  is optional. Renaming a field, changing the topic, or dropping to QoS 0 silently
+  breaks the consumer.
 - **ImageKit `ImageURL`:** the agent downloads the image from the public CDN URL the
   pipeline put in each message.
 - **Legacy ImageKit coupling (`--source imagekit` only):** filename convention

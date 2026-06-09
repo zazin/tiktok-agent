@@ -30,6 +30,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 from adb_pusher import run_adb, PhonePushError
+from tiktok_profile import ensure_account, TikTokProfileError
 
 
 # TikTok package names: global app, then the older/alt package as fallback.
@@ -321,19 +322,32 @@ def comment_on_post(
     serial: Optional[str] = None,
     package: Optional[str] = None,
     dry_run: bool = False,
+    account: Optional[str] = None,
 ) -> str:
     """
     Open the post at `url` and submit `text` as a comment.
+
+    If `account` is given, make sure that TikTok account is active first (switching
+    via the in-app switcher); if it can't be confirmed, return "wrong_account"
+    WITHOUT opening the post, so we never comment as the wrong account.
 
     Returns one of:
       - "commented"          — comment typed and submitted,
       - "dry_run"            — sheet + input reached; logged the comment, did NOT submit,
       - "skipped_non_ascii"  — nothing typeable after ASCII-stripping (not submitted),
+      - "wrong_account"      — target account couldn't be confirmed active (not submitted),
       - "needs_manual"       — a screen wasn't recognized; left as-is for a human.
 
     Raises:
         TikTokCommentError: If opening the post itself fails (no TikTok).
     """
+    if account:
+        try:
+            ensure_account(account, serial=serial, package=package)
+        except TikTokProfileError as e:
+            print(f"  wrong account: {e}", flush=True)
+            return "wrong_account"
+
     open_post(url, serial=serial, package=package)
 
     # Open the comment sheet (icon's content-desc embeds a count → substring match).
@@ -379,6 +393,7 @@ def _cli() -> int:
     parser.add_argument("comment", help="The comment text to submit")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones)")
     parser.add_argument("--package", default=None, help="Override TikTok package name")
+    parser.add_argument("--account", default=None, help="Target TikTok @handle to switch to before commenting")
     parser.add_argument("--dry-run", action="store_true", help="Open + focus input and log, but do NOT submit")
     args = parser.parse_args()
 
@@ -389,6 +404,7 @@ def _cli() -> int:
             serial=args.serial,
             package=args.package,
             dry_run=args.dry_run,
+            account=args.account,
         )
     except (TikTokCommentError, PhonePushError) as e:
         print(f"Error: {e}", file=sys.stderr)

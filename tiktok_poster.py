@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 from adb_pusher import run_adb, PhonePushError
+from tiktok_profile import ensure_account, TikTokProfileError
 
 
 # TikTok package names: global app, then the older/alt package as fallback.
@@ -250,9 +251,14 @@ def post(
     serial: Optional[str] = None,
     package: Optional[str] = None,
     auto_post: bool = False,
+    account: Optional[str] = None,
 ) -> str:
     """
     Post an already-pushed image to TikTok.
+
+    If `account` is given, make sure that TikTok account is active first (switching
+    via the in-app switcher); if it can't be confirmed, return "wrong_account"
+    WITHOUT opening the composer, so we never post to the wrong account.
 
     Phase 1 always opens the composer. If auto_post is False, returns "composer_open".
     If auto_post is True, attempts to advance through Next/Post screens and returns
@@ -264,6 +270,13 @@ def post(
     Raises:
         TikTokPostError: If Phase 1 itself fails (no TikTok / unshareable image).
     """
+    if account:
+        try:
+            ensure_account(account, serial=serial, package=package)
+        except TikTokProfileError as e:
+            print(f"  wrong account: {e}", flush=True)
+            return "wrong_account"
+
     open_in_tiktok(remote_path, serial=serial, package=package)
     time.sleep(STEP_DELAY)
 
@@ -342,6 +355,7 @@ def _cli() -> int:
     parser.add_argument("--folder", default="/tiktok", help="ImageKit folder to look up metadata in (with --from-imagekit, default: /tiktok)")
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones)")
     parser.add_argument("--package", default=None, help="Override TikTok package name")
+    parser.add_argument("--account", default=None, help="Target TikTok @handle to switch to before posting")
     parser.add_argument("--auto-post", action="store_true", help="Drive Next/Post automatically (brittle; actually publishes)")
     args = parser.parse_args()
 
@@ -375,6 +389,7 @@ def _cli() -> int:
             serial=args.serial,
             package=args.package,
             auto_post=args.auto_post,
+            account=args.account,
         )
     except TikTokPostError as e:
         print(f"Error: {e}", file=sys.stderr)
