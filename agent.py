@@ -42,6 +42,7 @@ DEFAULT_FOLDER = "/tiktok"
 DEFAULT_STATE = "agent_state.json"
 DEFAULT_INTERVAL = 60
 DEFAULT_SOURCE = "hivemq"
+DEFAULT_STORE_DIR = "queue_posts"
 
 
 def _log(msg: str) -> None:
@@ -80,6 +81,42 @@ def _description_from_file(meta: dict) -> Optional[str]:
     return None
 
 
+def _name_for(rec_id: Optional[str], fields: dict) -> str:
+    """Best-effort local filename for a message: ImagePath, else URL tail, else id."""
+    url = fields.get("ImageURL")
+    return fields.get("ImagePath") or (url.rsplit("/", 1)[-1] if url else None) or f"{rec_id}.jpg"
+
+
+def _post_record(fields: dict, *, serial: Optional[str], auto_post: bool, dest_dir: str) -> str:
+    """Download → push → (optionally) post one message's image.
+
+    Returns post()'s status ("posted"/"needs_manual"/"composer_open"), or "pushed"
+    when auto_post is off. Lets ImageKit/PhonePush/TikTokPost errors propagate so the
+    caller decides how to report/park them. Shared by the drain, watch, and retry paths.
+    """
+    from imagekit_source import download
+    from adb_pusher import push_to_phone
+    from tiktok_poster import post
+
+    rec_id = fields.get("id")
+    name = _name_for(rec_id, fields)
+    with tempfile.TemporaryDirectory() as tmp:
+        local = download(fields["ImageURL"], Path(tmp) / name)
+        remote = push_to_phone(str(local), dest_dir=dest_dir, serial=serial)
+        _log(f"  pushed {name} -> {remote}")
+        if not auto_post:
+            return "pushed"
+        status = post(
+            remote,
+            caption=fields.get("Caption"),
+            description=fields.get("Description"),
+            serial=serial,
+            auto_post=True,
+        )
+        _log(f"  tiktok: {status}")
+        return status
+
+
 def process_once(
     *,
     source: str,
@@ -88,27 +125,36 @@ def process_once(
     serial: Optional[str],
     auto_post: bool,
     dest_dir: str,
+    store_path: Path,
 ) -> int:
     """Run one poll cycle. Returns the number of newly processed images."""
     if source == "hivemq":
-        return _process_hivemq(serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+        return _process_hivemq(
+            serial=serial, auto_post=auto_post, dest_dir=dest_dir, store_path=store_path
+        )
     return _process_imagekit(
         folder=folder, state_path=state_path, serial=serial, auto_post=auto_post, dest_dir=dest_dir
     )
 
 
-def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) -> int:
+def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> int:
     """Poll the HiveMQ queue: post each pending message and report its status.
 
     Drains the backlog, posts each message, and acks (via update_status) only the
     ones that reach a terminal state. Unacked messages (the --no-auto-post path,
     or a crash) are released back to the broker by close() and redelivered next
     poll, so they are effectively left pending until actually posted.
+
+    Every received message is mirrored to its own JSON file in the local spool dir
+    the instant it arrives (so nothing is lost if the broker then drops it). The file
+    is deleted only on a successful post; a non-"posted" outcome or an error leaves it
+    on disk (status recorded) to be re-attempted later with --retry.
     """
+    import local_store
     from hivemq_source import list_pending, update_status, close, HiveMQSourceError
-    from imagekit_source import download, ImageKitSourceError
-    from adb_pusher import push_to_phone, PhonePushError
-    from tiktok_poster import post, TikTokPostError
+    from imagekit_source import ImageKitSourceError
+    from adb_pusher import PhonePushError
+    from tiktok_poster import TikTokPostError
 
     try:
         try:
@@ -131,35 +177,31 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) ->
             fields = rec.get("fields") or {}
             if not rec_id:
                 continue
-            url = fields.get("ImageURL")
-            name = fields.get("ImagePath") or (url.rsplit("/", 1)[-1] if url else None) or f"{rec_id}.jpg"
+            name = _name_for(rec_id, fields)
 
-            if not url:
+            if not fields.get("ImageURL"):
                 _log(f"  SKIP {rec_id}: no ImageURL")
-                _set_status(rec_id, "failed")
+                _set_status(rec_id, "failed")  # nothing to retry without a URL
                 done += 1
                 continue
 
+            # Always store on receive, before touching the phone, so a crash can't lose it.
+            local_store.store(store_path, rec_id, fields)
             try:
-                with tempfile.TemporaryDirectory() as tmp:
-                    local = download(url, Path(tmp) / name)
-                    remote = push_to_phone(str(local), dest_dir=dest_dir, serial=serial)
-                    _log(f"  pushed {name} -> {remote}")
-
-                    if not auto_post:
-                        _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
-                    else:
-                        status = post(
-                            remote,
-                            caption=fields.get("Caption"),
-                            description=fields.get("Description"),
-                            serial=serial,
-                            auto_post=True,
-                        )
-                        _log(f"  tiktok: {status}")
-                        _set_status(rec_id, "posted" if status == "posted" else "failed")
+                status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+                if not auto_post:
+                    _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
+                elif status == "posted":
+                    local_store.remove(store_path, rec_id)  # success → delete the file
+                    _set_status(rec_id, "posted")
+                else:
+                    local_store.mark(store_path, rec_id, status)
+                    _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
+                    _set_status(rec_id, "failed")
             except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
                 _log(f"  FAILED {name}: {e}")
+                local_store.mark(store_path, rec_id, "failed", error=str(e))
+                _log(f"  kept {rec_id} in {store_path} for retry")
                 _set_status(rec_id, "failed")
 
             done += 1
@@ -169,47 +211,48 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) ->
         close()
 
 
-def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str) -> None:
+def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> None:
     """Event-driven watch: react to each HiveMQ message the instant it arrives.
 
     Unlike the --once drain, this holds a persistent subscription (no poll
     interval) and dispatches each message to a handler that downloads, pushes, and
     (optionally) posts it. The handler's return value tells hivemq_source whether
     to publish a status + ack the message.
+
+    As in the drain path, every message is mirrored to its own JSON file on receive;
+    the file is deleted on a successful post and kept otherwise for --retry.
     """
+    import local_store
     from hivemq_source import watch, HiveMQSourceError
-    from imagekit_source import download, ImageKitSourceError
-    from adb_pusher import push_to_phone, PhonePushError
-    from tiktok_poster import post, TikTokPostError
+    from imagekit_source import ImageKitSourceError
+    from adb_pusher import PhonePushError
+    from tiktok_poster import TikTokPostError
 
     def handler(rec: dict) -> Optional[str]:
         rec_id = rec.get("id")
         fields = rec.get("fields") or {}
-        url = fields.get("ImageURL")
-        name = fields.get("ImagePath") or (url.rsplit("/", 1)[-1] if url else None) or f"{rec_id}.jpg"
+        name = _name_for(rec_id, fields)
         _log(f"Message {rec_id}")
-        if not url:
+        if not fields.get("ImageURL"):
             _log(f"  SKIP {rec_id}: no ImageURL")
-            return "failed"
+            return "failed"  # nothing to retry without a URL
+        # Always store on receive, before touching the phone, so a crash can't lose it.
+        local_store.store(store_path, rec_id, fields)
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                local = download(url, Path(tmp) / name)
-                remote = push_to_phone(str(local), dest_dir=dest_dir, serial=serial)
-                _log(f"  pushed {name} -> {remote}")
-                if not auto_post:
-                    _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
-                    return None
-                status = post(
-                    remote,
-                    caption=fields.get("Caption"),
-                    description=fields.get("Description"),
-                    serial=serial,
-                    auto_post=True,
-                )
-                _log(f"  tiktok: {status}")
-                return "posted" if status == "posted" else "failed"
+            status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+            if not auto_post:
+                _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
+                return None
+            if status == "posted":
+                local_store.remove(store_path, rec_id)  # success → delete the file
+                return "posted"
+            local_store.mark(store_path, rec_id, status)
+            _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
+            return "failed"
         except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
             _log(f"  FAILED {name}: {e}")
+            local_store.mark(store_path, rec_id, "failed", error=str(e))
+            _log(f"  kept {rec_id} in {store_path} for retry")
             return "failed"
 
     _log("Watching HiveMQ topic (event-driven, push; Ctrl-C to stop)...")
@@ -314,6 +357,47 @@ def _catch_up_hivemq() -> int:
         close()
 
 
+def _retry_posts(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> int:
+    """Re-attempt every post still sitting in the local spool dir (one JSON per item).
+
+    Talks only to local disk (no HiveMQ): re-downloads, re-pushes, and re-posts each
+    surviving file. On "posted" the file is deleted; otherwise it stays (its status and
+    attempts count are updated). Returns the number that succeeded.
+    """
+    import local_store
+    from imagekit_source import ImageKitSourceError
+    from adb_pusher import PhonePushError
+    from tiktok_poster import TikTokPostError
+
+    entries = local_store.items(store_path)
+    _log(f"Retry: {len(entries)} stored post(s) in {store_path}")
+
+    succeeded = 0
+    for entry in entries:
+        rec_id = entry["key"]
+        fields = entry.get("payload") or {}
+        name = _name_for(rec_id, fields)
+        if not fields.get("ImageURL"):
+            _log(f"  SKIP {rec_id}: no ImageURL in stored payload")
+            continue
+        local_store.store(store_path, rec_id, fields)  # bump attempts for this retry
+        _log(f"Retry {rec_id} (attempt {int(entry.get('attempts', 0)) + 1})")
+        try:
+            status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+            if status == "posted":
+                local_store.remove(store_path, rec_id)
+                succeeded += 1
+            else:
+                local_store.mark(store_path, rec_id, status)
+                _log(f"  still {status}; kept in {store_path}")
+        except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
+            _log(f"  FAILED {name}: {e}")
+            local_store.mark(store_path, rec_id, "failed", error=str(e))
+
+    _log(f"Retry: {succeeded} posted, {len(local_store.items(store_path))} still stored.")
+    return succeeded
+
+
 def catch_up(*, source: str, folder: str, state_path: Path) -> int:
     """
     Skip the current backlog WITHOUT posting it.
@@ -380,12 +464,29 @@ def _cli() -> int:
         action="store_true",
         help="Skip the current backlog WITHOUT posting, then exit (run before an always-on watch)",
     )
+    parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="Re-attempt every post still in the local spool dir, then exit (no HiveMQ)",
+    )
+    parser.add_argument(
+        "--store-dir",
+        default=DEFAULT_STORE_DIR,
+        help=f"Local spool dir holding one JSON per pending post (default: {DEFAULT_STORE_DIR})",
+    )
     args = parser.parse_args()
 
     state_path = Path(args.state)
+    store_path = Path(args.store_dir)
 
     if args.catch_up:
         catch_up(source=args.source, folder=args.folder, state_path=state_path)
+        return 0
+
+    if args.retry:
+        _retry_posts(
+            serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path
+        )
         return 0
 
     kw = dict(
@@ -395,13 +496,16 @@ def _cli() -> int:
         serial=args.serial,
         auto_post=args.auto_post,
         dest_dir=args.dest,
+        store_path=store_path,
     )
 
     if args.watch:
         if args.source == "hivemq":
             # MQTT is push: hold a persistent subscription and react instantly.
             # No --interval (that only applies to the imagekit folder poll).
-            _watch_hivemq(serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest)
+            _watch_hivemq(
+                serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path
+            )
             return 0
         _log(f"Watching {args.folder} every {args.interval}s (Ctrl-C to stop)...")
         try:

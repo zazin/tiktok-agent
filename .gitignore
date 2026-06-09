@@ -5,4 +5,6 @@ __pycache__/
 
 # Local processing state and downloads
 agent_state.json
+queue_posts/
+queue_comments/
 downloads/

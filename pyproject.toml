@@ -30,5 +30,6 @@ include = [
     "tiktok_commenter.py",
     "comment_source.py",
     "comment_agent.py",
+    "local_store.py",
     "env_loader.py",
 ]

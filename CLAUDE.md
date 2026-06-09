@@ -43,6 +43,7 @@ uv run tiktok-agent --catch-up     # drain current backlog WITHOUT posting (run 
 uv run tiktok-agent --watch        # event-driven: stays subscribed, auto-posts each message instantly
 uv run tiktok-agent --once         # drain the current backlog once and exit
 uv run tiktok-agent --watch --no-auto-post   # push to phone only, leave messages unacked
+uv run tiktok-agent --retry                  # re-attempt posts still in queue_posts/ (no HiveMQ)
 uv run tiktok-agent --once --source imagekit # legacy: poll the ImageKit folder instead
 uv run tiktok-hivemq                         # inspect the HiveMQ queue (peek the backlog, no ack)
 uv run tiktok-source --folder /tiktok        # inspect the legacy ImageKit queue
@@ -53,6 +54,7 @@ uv run tiktok-post /sdcard/Pictures/x.jpg --auto-post --from-imagekit   # post a
 uv run tiktok-commenter --catch-up                 # drain the comment backlog WITHOUT commenting (run once first)
 uv run tiktok-commenter --watch                    # event-driven: comment on each tiktok/comments message instantly
 uv run tiktok-commenter --once --dry-run           # drain once, log what it would comment, DON'T submit
+uv run tiktok-commenter --retry                    # re-attempt comments still in queue_comments/ (no HiveMQ)
 ```
 
 There are **no tests, linter, or build step** configured. The wheel `include`
@@ -109,6 +111,7 @@ sequence. Each module is a single-responsibility seam with its own error type:
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
 | `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post | `TikTokPostError` |
+| `local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
 | `env_loader.py` | Zero-dep `.env` loader | — |
 
 The **comment-on-post** feature is a second, independent consumer (its own
@@ -143,16 +146,27 @@ is push, so the two run modes differ:
 Both modes use `manual_ack=True`, so paho sends the PUBACK only when the agent
 calls `update_status()`. After acting on a message:
 - `post()` returns `"posted"` → publish `posted` + **ack** (message dropped)
-- `post()` returns `"needs_manual"`, raises, or `ImageURL` is empty → publish
-  `failed` + **ack** (`failed` drops the message just like a "posted" ack so it
-  won't loop; on `needs_manual` the composer is still open on the phone to finish
-  by hand)
+- `post()` returns `"needs_manual"`/`"composer_open"` or raises → the message's spool
+  file is **kept** (its status recorded) and the broker message gets `failed` + **ack**
+  (`failed` drops the broker copy just like a "posted" ack so it won't loop; on
+  `needs_manual` the composer is still open on the phone to finish by hand). An empty
+  `ImageURL` is acked-and-dropped **without** spooling (nothing to retry without a URL).
 - `--no-auto-post` → message is **never acked** (pushed to phone only); on the next
   reconnect the broker redelivers it, so it is re-pushed until it is actually posted
 
-There is **no local state file** in this mode (the broker holds the queue).
-Trade-off: a crash between a successful post and the ack leaves the message
-unacked, so it is redelivered and could be re-posted later.
+**Local spool dir (`queue_posts/`, gitignored, override with `--store-dir`):** the
+broker holds the live queue, but **every received message is mirrored to its own JSON
+file the instant it arrives** (`local_store.store`, written before the phone is
+touched), so nothing is lost if the broker then drops it. One file per item
+(`<slug>-<hash>.json`, holding `{key, payload: fields, status, error, attempts, ts}`).
+On a successful post the file is **deleted** (`local_store.remove`); any other outcome
+leaves it on disk — so `queue_posts/` accumulates exactly the items still needing
+attention. `tiktok-agent --retry` re-runs download→push→post for each surviving file
+**talking only to local disk** (no HiveMQ): on `posted` the file is deleted, otherwise
+its status/attempts are updated. Run `--retry` by hand once the phone/UI is ready.
+Trade-off: a crash between a successful post and the broker ack leaves the broker
+message unacked, so it is redelivered and could be re-posted later (the local file is
+already gone, so the redelivery just re-spools and re-posts).
 
 The persistent client is a module-level singleton in `hivemq_source.py`;
 `_process_hivemq`/`_catch_up_hivemq` wrap their drain in `try/finally: close()`,
@@ -230,6 +244,13 @@ AI — the exact comment text is in the message.
   `skipped_non_ascii` (nothing typeable after stripping — not submitted),
   `failed` (open/adb error). `--dry-run` opens + focuses the input and logs the
   comment but **never submits** and leaves the message unacked.
+- **Local spool dir (mirrors the poster):** every received comment is mirrored to its
+  own JSON file in `queue_comments/` on receive (keyed by `PostURL`, payload
+  `{post_url, comment}`, via the shared `local_store.py`), before the phone is touched.
+  Terminal outcomes delete the file — `commented` (success) **and** `skipped_non_ascii`
+  (can never be typed, so retrying is pointless); `needs_manual`/`failed` keep it.
+  `--dry-run` does **not** spool. `tiktok-commenter --retry` re-attempts each surviving
+  file locally (no HiveMQ). Override the dir with `--store-dir`.
 - **Same brittleness + defensiveness as the poster:** the UI labels live in the
   constants block at the top of `tiktok_commenter.py` (`COMMENT_OPEN_SUBSTRINGS`,
   `COMMENT_INPUT_HINTS`, `COMMENT_SEND_LABELS`, `STEP_DELAY`, `STEP_RETRIES`) —
