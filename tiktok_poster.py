@@ -53,6 +53,10 @@ CAPTION_HINTS = (
 STEP_DELAY = 2.5
 STEP_RETRIES = 6
 
+# After a successful post, wait this long (so the upload finishes) before
+# force-stopping TikTok.
+POST_SUCCESS_KILL_DELAY = 8.0
+
 
 class TikTokPostError(Exception):
     """Raised when the auto-post flow fails."""
@@ -174,6 +178,14 @@ def _tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
 
+def _force_stop(package: str, serial: Optional[str]) -> None:
+    """Force-stop TikTok (best-effort; never fatal)."""
+    try:
+        run_adb(["shell", "am", "force-stop", package], serial=serial)
+    except PhonePushError:
+        pass
+
+
 def _wait_and_tap(
     labels: tuple[str, ...],
     serial: Optional[str],
@@ -277,7 +289,7 @@ def post(
             print(f"  wrong account: {e}", flush=True)
             return "wrong_account"
 
-    open_in_tiktok(remote_path, serial=serial, package=package)
+    pkg = open_in_tiktok(remote_path, serial=serial, package=package)
     time.sleep(STEP_DELAY)
 
     if not auto_post:
@@ -294,6 +306,11 @@ def post(
         if not _wait_and_tap(labels, serial):
             # A screen we didn't recognize — stop and leave it for the human.
             return "needs_manual"
+
+    # Posted successfully — wait for the upload to finish, then close TikTok so
+    # it isn't left running.
+    time.sleep(POST_SUCCESS_KILL_DELAY)
+    _force_stop(pkg, serial)
     return "posted"
 
 
