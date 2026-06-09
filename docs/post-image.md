@@ -56,6 +56,7 @@ the broker will disconnect the agent.
 | `Caption` | string | no | The hook line. Goes first in TikTok's single text field. |
 | `Description` | string | no | Appended after the caption on a new line. |
 | `ImagePath` | string | no | Suggested filename on the phone; if omitted the agent derives one from `ImageURL`. |
+| `Account` | string (`@handle`) | no | TikTok account to post as. The agent switches to it via the in-app account switcher **before** posting; if it can't confirm the account is active it reports `wrong_account` and **does not post**. Omit to post as whatever account is currently active. |
 | `CreatedAt` | string (ISO-8601) | no | Informational only. |
 
 > **ASCII-only typing.** Captions are typed via `adb input text`, which **cannot
@@ -71,6 +72,7 @@ the broker will disconnect the agent.
   "Description": "Honest take on the new ABS tech.",
   "ImageURL": "https://ik.imagekit.io/your_id/tiktok_1733570400.jpg",
   "ImagePath": "tiktok_1733570400.jpg",
+  "Account": "@captgani",
   "CreatedAt": "2026-06-07T12:00:00Z"
 }
 ```
@@ -91,7 +93,7 @@ Subscribing is optional.
 | `status` | Meaning |
 |----------|---------|
 | `posted` | Posted to TikTok successfully. |
-| `failed` | Posting failed, or auto-post stopped on an unrecognized screen, or `ImageURL` was empty. The message is dropped (not retried). |
+| `failed` | Posting failed, or auto-post stopped on an unrecognized screen, or the target `Account` couldn't be made active (`wrong_account` — **nothing was posted**), or `ImageURL` was empty. The message is dropped (not retried). |
 
 `ts` is a Unix epoch (seconds, integer).
 

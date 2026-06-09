@@ -55,6 +55,7 @@ or the broker will disconnect the agent.
 |-------|------|:--------:|-------------|
 | `PostURL` | string (URL) | **yes** | Full TikTok post URL, e.g. `https://www.tiktok.com/@user/video/<id>`. Correlation key for the status message. A message without a non-empty `PostURL` is **dropped**. |
 | `Comment` | string | **yes** | The exact comment text to submit. A message without a non-empty `Comment` is **dropped**. |
+| `Account` | string (`@handle`) | no | TikTok account to comment as. The agent switches to it via the in-app account switcher **before** opening the post; if it can't confirm the account is active it reports `wrong_account` and **does not comment**. Omit to comment as whatever account is currently active. |
 
 > **No `id` and no `CreatedAt`.** Acking uses the MQTT message id internally; status
 > is keyed by `PostURL`.
@@ -69,7 +70,8 @@ or the broker will disconnect the agent.
 ```json
 {
   "PostURL": "https://www.tiktok.com/@captgani/video/7648864421841816852",
-  "Comment": "Nice video!"
+  "Comment": "Nice video!",
+  "Account": "@captgani"
 }
 ```
 
@@ -91,6 +93,7 @@ Subscribing is optional.
 | `commented` | Comment typed and submitted successfully. |
 | `needs_manual` | A screen wasn't recognized; the agent stopped rather than tap blindly. |
 | `skipped_non_ascii` | Nothing typeable remained after stripping non-ASCII; not submitted. |
+| `wrong_account` | The target `Account` couldn't be made active; **nothing was commented**. |
 | `failed` | Could not open the post / adb error. |
 
 `ts` is a Unix epoch (seconds, integer). **All** statuses (including the non-success
