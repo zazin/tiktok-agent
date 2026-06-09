@@ -245,13 +245,24 @@ which the posters map to the status **`"wrong_account"`** — **nothing is poste
 commented**, the spool file is kept, and the broker message is acked `failed` (so it
 doesn't loop). Re-attempt with `--retry` once the account is switchable.
 
-This is the **most fragile** flow (TikTok A/B-tests the profile header heavily). Its
-UI selectors live in the constants block at the top of `tiktok_profile.py`
-(`PROFILE_TAB_LABELS`, `SWITCH_OPEN_LABELS`, `HANDLE_RE`, `STEP_DELAY`,
-`STEP_RETRIES`) — **guesses that must be calibrated on-device** against a real
-`uiautomator dump` of the Profile tab and the open account-switcher sheet. Use
-`uv run tiktok-profile` (no arg = print the current `@handle`; `tiktok-profile
-@target` = switch) to calibrate in isolation. The low-level UI helpers are
+This is the **most fragile** flow (TikTok A/B-tests the profile header heavily) and
+its selectors are **calibrated on a real device** (`com.ss.android.ugc.trill`, ID
+locale) — re-verify with `uiautomator dump` if the UI shifts. Three calibration
+facts drove the implementation, encoded in the constants/helpers at the top of
+`tiktok_profile.py`:
+- **The home feed blocks `uiautomator dump`** (it returns the launcher window
+  behind it), so the profile is opened by **deep link** (`PROFILE_DEEPLINKS`,
+  `snssdk1233://profile`), **not** by tapping the bottom-nav tab. Other TikTok
+  screens (profile, search, composer, comment sheet) dump fine.
+- The active handle is read from a `@name` **TEXT** node (`HANDLE_RE` requires a
+  letter so untranslated `content-desc="@2131…"` resource refs aren't mistaken for
+  it). The **account switcher is opened by tapping the display-NAME button** just
+  above the handle (`_find_switch_trigger` anchors on the handle node).
+- In the "Beralih akun" sheet each account row's **content-desc is the bare handle
+  without `@`** (e.g. `captgani`), matched normalized by `_find_account_row`.
+
+Use `uv run tiktok-profile` (no arg = print the current `@handle`; `tiktok-profile
+@target` = switch) to re-calibrate in isolation. The low-level UI helpers are
 **copied** from `tiktok_poster.py`, following the per-feature-duplication pattern;
 unlike them this one module is **shared** by both consumers (the account check is
 identical). It fails *safe*: an unconfirmed account never posts to the wrong one.
