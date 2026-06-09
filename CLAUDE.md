@@ -155,9 +155,10 @@ calls `update_status()`. After acting on a message:
 - `post()` returns `"needs_manual"`/`"composer_open"`/`"wrong_account"` or raises →
   the message's spool file is **kept** (its status recorded) and the broker message
   gets `failed` + **ack** (`failed` drops the broker copy just like a "posted" ack so
-  it won't loop; on `needs_manual` the composer is still open on the phone to finish
-  by hand; `wrong_account` means the target account couldn't be confirmed active so
-  **nothing was posted** — re-attempt with `--retry` once the account is switchable).
+  it won't loop; on `needs_manual` TikTok is **force-stopped** — not left open — and
+  the item stays spooled for `--retry`; `wrong_account` means the target account
+  couldn't be confirmed active so **nothing was posted** (TikTok is force-stopped
+  too) — re-attempt with `--retry` once the account is switchable).
   An empty `ImageURL` is acked-and-dropped **without** spooling (nothing to retry).
 - `--no-auto-post` → message is **never acked** (pushed to phone only); on the next
   reconnect the broker redelivers it, so it is re-pushed until it is actually posted
@@ -211,11 +212,13 @@ arguably against TikTok's ToS:
   screen it dumps the UI tree (`uiautomator dump`), finds a node whose
   text/content-desc matches a label, and taps its center. The order matters so an
   ambiguous label on a later screen can't be tapped early. On any **unrecognized**
-  screen it stops and returns `"needs_manual"`, leaving the composer open rather
-  than tapping blindly. On success it waits `POST_SUCCESS_KILL_DELAY` (so the
-  upload finishes), then **`am force-stop`s the TikTok package** so the app isn't
-  left running — this fires **only** on `"posted"`; `needs_manual`/`composer_open`/
-  `wrong_account` leave the app open (the composer is deliberately still on screen).
+  screen it stops and returns `"needs_manual"` rather than tapping blindly. TikTok
+  is then **`am force-stop`ped** — on success after waiting `POST_SUCCESS_KILL_DELAY`
+  (so the upload finishes), and **immediately** on every error outcome
+  (`needs_manual`/`wrong_account`) so the app is never left in a half-finished
+  state; the item stays spooled for `--retry`. The **only** path that leaves TikTok
+  open is `composer_open` (`--no-auto-post`), which is an explicit "push to phone,
+  finish by hand" mode, not an error.
 
 **When TikTok's UI changes, the constants at the top of `tiktok_poster.py` are the
 tuning knobs:** `TIKTOK_PACKAGES`, `POST_FLOW_STEPS`, `CAPTION_HINTS`,
@@ -309,8 +312,12 @@ AI — the exact comment text is in the message.
   `needs_manual` (an unrecognized screen — stop, don't tap blindly),
   `skipped_non_ascii` (nothing typeable after stripping — not submitted),
   `wrong_account` (target `Account` couldn't be confirmed active — not submitted),
-  `failed` (open/adb error). `--dry-run` opens + focuses the input and logs the
-  comment but **never submits** and leaves the message unacked.
+  `failed` (open/adb error). On success TikTok is force-stopped after
+  `COMMENT_SUCCESS_KILL_DELAY`; on every **error** outcome
+  (`needs_manual`/`skipped_non_ascii`/`wrong_account`) it is force-stopped
+  **immediately** so it's never left open. `--dry-run` opens + focuses the input and
+  logs the comment but **never submits**, leaves the message unacked, and is the one
+  path that leaves the app open (for inspection).
 - **Local spool dir (mirrors the poster):** every received comment is mirrored to its
   own JSON file in `queue_comments/` on receive (keyed by `PostURL`, payload
   `{post_url, comment, account}`, via the shared `local_store.py`), before the phone is

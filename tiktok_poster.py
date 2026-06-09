@@ -178,12 +178,18 @@ def _tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
 
-def _force_stop(package: str, serial: Optional[str]) -> None:
-    """Force-stop TikTok (best-effort; never fatal)."""
-    try:
-        run_adb(["shell", "am", "force-stop", package], serial=serial)
-    except PhonePushError:
-        pass
+def _force_stop(package: Optional[str], serial: Optional[str]) -> None:
+    """Force-stop TikTok (best-effort; never fatal).
+
+    If `package` is None (e.g. an error before we resolved which package opened),
+    stop every known TikTok package — force-stopping a non-running one is a no-op.
+    """
+    targets = [package] if package else list(TIKTOK_PACKAGES)
+    for pkg in targets:
+        try:
+            run_adb(["shell", "am", "force-stop", pkg], serial=serial)
+        except PhonePushError:
+            pass
 
 
 def _wait_and_tap(
@@ -272,9 +278,12 @@ def post(
     via the in-app switcher); if it can't be confirmed, return "wrong_account"
     WITHOUT opening the composer, so we never post to the wrong account.
 
-    Phase 1 always opens the composer. If auto_post is False, returns "composer_open".
-    If auto_post is True, attempts to advance through Next/Post screens and returns
-    "posted" on success or "needs_manual" if a screen wasn't recognized.
+    Phase 1 always opens the composer. If auto_post is False, returns "composer_open"
+    (left open on purpose for manual finishing). If auto_post is True, attempts to
+    advance through Next/Post screens and returns "posted" on success or
+    "needs_manual" if a screen wasn't recognized. On every error outcome
+    ("wrong_account"/"needs_manual") TikTok is force-stopped so it isn't left open;
+    the message stays spooled for --retry.
 
     The caption and description are combined (see build_post_text) into TikTok's
     single text field — caption first, description on the next line.
@@ -287,6 +296,7 @@ def post(
             ensure_account(account, serial=serial, package=package)
         except TikTokProfileError as e:
             print(f"  wrong account: {e}", flush=True)
+            _force_stop(package, serial)  # don't leave TikTok open on an error
             return "wrong_account"
 
     pkg = open_in_tiktok(remote_path, serial=serial, package=package)
@@ -304,7 +314,9 @@ def post(
         if idx == last_idx and post_text:
             _type_caption(post_text, serial)  # best-effort, never fatal
         if not _wait_and_tap(labels, serial):
-            # A screen we didn't recognize — stop and leave it for the human.
+            # A screen we didn't recognize — force-stop TikTok rather than leaving
+            # the composer open; the message stays spooled for --retry.
+            _force_stop(pkg, serial)
             return "needs_manual"
 
     # Posted successfully — wait for the upload to finish, then close TikTok so

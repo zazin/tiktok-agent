@@ -176,12 +176,18 @@ def _tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
 
-def _force_stop(package: str, serial: Optional[str]) -> None:
-    """Force-stop TikTok (best-effort; never fatal)."""
-    try:
-        run_adb(["shell", "am", "force-stop", package], serial=serial)
-    except PhonePushError:
-        pass
+def _force_stop(package: Optional[str], serial: Optional[str]) -> None:
+    """Force-stop TikTok (best-effort; never fatal).
+
+    If `package` is None (e.g. an error before we resolved which package opened),
+    stop every known TikTok package — force-stopping a non-running one is a no-op.
+    """
+    targets = [package] if package else list(TIKTOK_PACKAGES)
+    for pkg in targets:
+        try:
+            run_adb(["shell", "am", "force-stop", pkg], serial=serial)
+        except PhonePushError:
+            pass
 
 
 def _screen_size(serial: Optional[str]) -> tuple[int, int]:
@@ -366,7 +372,11 @@ def comment_on_post(
       - "dry_run"            — sheet + input reached; logged the comment, did NOT submit,
       - "skipped_non_ascii"  — nothing typeable after ASCII-stripping (not submitted),
       - "wrong_account"      — target account couldn't be confirmed active (not submitted),
-      - "needs_manual"       — a screen wasn't recognized; left as-is for a human.
+      - "needs_manual"       — a screen wasn't recognized.
+
+    On every error outcome (wrong_account / needs_manual / skipped_non_ascii) TikTok
+    is force-stopped so it isn't left open; the message stays spooled for --retry.
+    "dry_run" is the exception — it leaves the app open for inspection.
 
     Raises:
         TikTokCommentError: If opening the post itself fails (no TikTok).
@@ -376,6 +386,7 @@ def comment_on_post(
             ensure_account(account, serial=serial, package=package)
         except TikTokProfileError as e:
             print(f"  wrong account: {e}", flush=True)
+            _force_stop(package, serial)  # don't leave TikTok open on an error
             return "wrong_account"
 
     pkg = open_post(url, serial=serial, package=package)
@@ -383,10 +394,12 @@ def comment_on_post(
     # TikTok loops the video, keeping the UI non-idle so `uiautomator dump` fails
     # and returns a stale tree — pause it first so every dump below is real.
     if not _pause_video(serial):
+        _force_stop(pkg, serial)
         return "needs_manual"
 
     # Open the comment sheet (icon's content-desc embeds a count → substring match).
     if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
+        _force_stop(pkg, serial)
         return "needs_manual"
 
     # Locate the comment input field and capture its bounds BEFORE focusing it:
@@ -394,6 +407,7 @@ def comment_on_post(
     # derive the send-button position from this geometry instead of re-dumping.
     input_bounds = _wait_for_bounds(COMMENT_INPUT_HINTS, serial)
     if not input_bounds:
+        _force_stop(pkg, serial)
         return "needs_manual"
     ix1, iy1, ix2, iy2 = input_bounds
     input_cx, input_cy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
@@ -403,6 +417,7 @@ def comment_on_post(
     typeable = _ascii_for_input(text)
     if not typeable:
         # adb input can't type this (e.g. all emoji/non-Latin); don't submit blank.
+        _force_stop(pkg, serial)
         return "skipped_non_ascii"
 
     if dry_run:

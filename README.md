@@ -111,7 +111,7 @@ The agent publishes one of two outcomes to the status topic, owned jointly by bo
 |-------|--------|---------|
 | (queued) | pipeline | Freshly published to the work topic, ready to post. The agent drains these. |
 | `posted` | agent | Successfully posted to TikTok; the work message is acked. |
-| `failed` | agent | Posting failed, or auto-post stopped on an unrecognized screen (`needs_manual` — the composer is left open on the phone to finish by hand); the work message is acked (dropped). |
+| `failed` | agent | Posting failed, or auto-post stopped on an unrecognized screen (`needs_manual`); TikTok is force-stopped (not left open) and the item stays spooled for `--retry`; the work message is acked (dropped). |
 
 There is **no local state file** in HiveMQ mode — the broker's persistent session is the queue.
 Trade-off: a crash between a successful post and the ack leaves the message unacked, so it is
@@ -129,7 +129,7 @@ redelivered and could be re-posted on the next poll.
 Auto-post is **on by default** and **publishes real public posts** to the logged-in TikTok account. `tiktok_poster.py` drives TikTok's UI over adb in two phases:
 
 1. **Phase 1:** a `SEND` intent opens TikTok's composer with the image attached. Reliable.
-2. **Phase 2:** dumps the UI tree and taps Foto → Next → Post by label, typing the caption first. **Brittle** (breaks when TikTok changes its UI) and potentially against TikTok's Terms of Service. On any screen it doesn't recognize it stops and leaves the composer open (`needs_manual` → the message is marked `failed`). On success it waits a few seconds for the upload to finish, then **force-stops the TikTok app** (only on `posted` — `needs_manual` leaves it open to finish by hand).
+2. **Phase 2:** dumps the UI tree and taps Foto → Next → Post by label, typing the caption first. **Brittle** (breaks when TikTok changes its UI) and potentially against TikTok's Terms of Service. On any screen it doesn't recognize it stops (`needs_manual` → the message is marked `failed`). It **force-stops the TikTok app** on the way out — on success after waiting a few seconds for the upload to finish, and immediately on any error (`needs_manual`/`wrong_account`) so the app is never left half-open; the item stays spooled for `--retry`. Only `--no-auto-post` (which just opens the composer) leaves TikTok open, by design.
 
 Use `--no-auto-post` (agent) or omit `--auto-post` (tiktok-post) to only open the composer / push to the gallery and finish manually. Button labels and the package name are constants at the top of `tiktok_poster.py` — tune them when TikTok's UI shifts.
 
@@ -169,7 +169,10 @@ uv run tiktok-commenter --once --dry-run    # open posts + log the comment, but 
 Statuses (all drop the message so it won't loop): `commented`, `needs_manual` (an
 unrecognized screen — it stops rather than tap blindly), `skipped_non_ascii`
 (nothing typeable after stripping emoji/non-ASCII — `adb input text` can't enter
-those), `failed`.
+those), `wrong_account`, `failed`. TikTok is force-stopped on the way out — after a
+short delay on success, and immediately on any error — so it's never left open; the
+item stays spooled for `--retry` (except `--dry-run`, which leaves it open for
+inspection).
 
 **Same brittleness caveat as auto-post:** opening the post by deep-link is reliable,
 but finding the comment icon → input → send depends on TikTok's current UI. Those
