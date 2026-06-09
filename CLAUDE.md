@@ -211,11 +211,14 @@ arguably against TikTok's ToS:
   text/content-desc matches a label, and taps its center. The order matters so an
   ambiguous label on a later screen can't be tapped early. On any **unrecognized**
   screen it stops and returns `"needs_manual"`, leaving the composer open rather
-  than tapping blindly.
+  than tapping blindly. On success it waits `POST_SUCCESS_KILL_DELAY` (so the
+  upload finishes), then **`am force-stop`s the TikTok package** so the app isn't
+  left running — this fires **only** on `"posted"`; `needs_manual`/`composer_open`/
+  `wrong_account` leave the app open (the composer is deliberately still on screen).
 
 **When TikTok's UI changes, the constants at the top of `tiktok_poster.py` are the
 tuning knobs:** `TIKTOK_PACKAGES`, `POST_FLOW_STEPS`, `CAPTION_HINTS`,
-`STEP_DELAY`, `STEP_RETRIES`.
+`STEP_DELAY`, `STEP_RETRIES`, `POST_SUCCESS_KILL_DELAY`.
 
 ### Caption handling
 

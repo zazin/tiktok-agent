@@ -129,7 +129,7 @@ redelivered and could be re-posted on the next poll.
 Auto-post is **on by default** and **publishes real public posts** to the logged-in TikTok account. `tiktok_poster.py` drives TikTok's UI over adb in two phases:
 
 1. **Phase 1:** a `SEND` intent opens TikTok's composer with the image attached. Reliable.
-2. **Phase 2:** dumps the UI tree and taps Foto → Next → Post by label, typing the caption first. **Brittle** (breaks when TikTok changes its UI) and potentially against TikTok's Terms of Service. On any screen it doesn't recognize it stops and leaves the composer open (`needs_manual` → the message is marked `failed`).
+2. **Phase 2:** dumps the UI tree and taps Foto → Next → Post by label, typing the caption first. **Brittle** (breaks when TikTok changes its UI) and potentially against TikTok's Terms of Service. On any screen it doesn't recognize it stops and leaves the composer open (`needs_manual` → the message is marked `failed`). On success it waits a few seconds for the upload to finish, then **force-stops the TikTok app** (only on `posted` — `needs_manual` leaves it open to finish by hand).
 
 Use `--no-auto-post` (agent) or omit `--auto-post` (tiktok-post) to only open the composer / push to the gallery and finish manually. Button labels and the package name are constants at the top of `tiktok_poster.py` — tune them when TikTok's UI shifts.
 
