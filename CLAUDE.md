@@ -110,7 +110,8 @@ sequence. Each module is a single-responsibility seam with its own error type:
 
 | Module | Role | Error type |
 |--------|------|-----------|
-| `agent.py` | Orchestrator: receive/drain → download → push → (auto-post) → report status. `--watch` calls `_watch_hivemq` (event-driven); `--once`/`process_once` dispatch `_process_hivemq` (drain) or `_process_imagekit` on `--source` | — |
+| `agent.py` | Orchestrator (HiveMQ path + dispatch + CLI): receive/drain → download → push → (auto-post) → report status. `--watch` calls `_watch_hivemq` (event-driven); `--once`/`process_once` dispatch `_process_hivemq` (drain) or delegate to `imagekit_agent` on `--source imagekit` | — |
+| `imagekit_agent.py` | Legacy `--source imagekit` orchestration (`process_imagekit`/`catch_up_imagekit`), split out of `agent.py`: dedups the ImageKit folder against the local `agent_state.json` | — |
 | `hivemq_source.py` | `watch(handler)` (persistent push subscription) + `list_pending()`/`update_status()`/`close()` (one-shot drain), over MQTT (paho, persistent QoS-1 session) | `HiveMQSourceError` |
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
 | `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
@@ -286,9 +287,24 @@ AI — the exact comment text is in the message.
   logs any message missing a non-empty `PostURL` or `Comment`.
 - **Flow (`comment_agent.py` → `tiktok_commenter.comment_on_post`):** deep-link
   open the post (`am start -a android.intent.action.VIEW -d <url> -p <pkg>`, the
-  reliable part) → tap the comment icon (its content-desc embeds a live count, so
-  matched by **substring** via `_find_partial`/`_wait_and_tap_partial`) → focus the
-  input field → type → tap send → dismiss the keyboard.
+  reliable part) → **pause the video** (`_pause_video`) → tap the comment icon (its
+  content-desc embeds a live count, so matched by **substring** via
+  `_find_partial`/`_wait_and_tap_partial`) → focus the input field (capturing its
+  bounds) → type → hide keyboard → **tap send positionally** → wait
+  `COMMENT_SUCCESS_KILL_DELAY` then `am force-stop` TikTok.
+- **Two calibration facts (the part that breaks silently, learned on-device):**
+  TikTok loops the post video, which keeps the UI perpetually **non-idle** so
+  `uiautomator dump` fails with *"could not get idle state"* and returns a **stale**
+  tree — so the very first selector lookup matches nothing and you get
+  `needs_manual` even though the controls are on screen. `_pause_video` fixes this:
+  it taps the video center to pause, then **confirms a dump actually succeeds**
+  (retrying — the post is still loading for the first moment, so an early tap is a
+  no-op), returning as soon as it does (a second tap would *resume* playback).
+  Second: once the comment input is **focused**, its blinking cursor keeps the UI
+  non-idle again, so the **send button can't be found by dumping** — it's tapped
+  **positionally** at the right end of the input row (`SEND_BTN_X_FRAC` × width, at
+  the input field's captured vertical center) after hiding the keyboard. The
+  `PAUSE_TAP_*`/`SEND_BTN_X_FRAC` fractions are the geometry knobs.
 - **Statuses (all ack-drop so a stuck UI doesn't loop):** `commented` (success),
   `needs_manual` (an unrecognized screen — stop, don't tap blindly),
   `skipped_non_ascii` (nothing typeable after stripping — not submitted),
@@ -306,8 +322,10 @@ AI — the exact comment text is in the message.
   file locally (no HiveMQ). Override the dir with `--store-dir`.
 - **Same brittleness + defensiveness as the poster:** the UI labels live in the
   constants block at the top of `tiktok_commenter.py` (`COMMENT_OPEN_SUBSTRINGS`,
-  `COMMENT_INPUT_HINTS`, `COMMENT_SEND_LABELS`, `STEP_DELAY`, `STEP_RETRIES`) —
-  **guesses that must be calibrated on-device against a real `uiautomator dump`.**
+  `COMMENT_INPUT_HINTS`, `PAUSE_TAP_X_FRAC`/`PAUSE_TAP_Y_FRAC`, `SEND_BTN_X_FRAC`,
+  `STEP_DELAY`, `STEP_RETRIES`, `COMMENT_SUCCESS_KILL_DELAY`) — **guesses that must
+  be calibrated on-device against a real `uiautomator dump`.** (The send button has
+  **no** label constant — see the positional-tap calibration fact above.)
   The low-level UI helpers (`_dump_ui`, `_find_tappable`, `_input_line`, …) are
   intentionally **copied** from `tiktok_poster.py` (no shared util module), and
   `comment_source.py` likewise duplicates `hivemq_source.py`'s MQTT plumbing so the

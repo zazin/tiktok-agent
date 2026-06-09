@@ -24,6 +24,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 include = [
     "agent.py",
+    "imagekit_agent.py",
     "imagekit_source.py",
     "hivemq_source.py",
     "adb_pusher.py",

@@ -6,9 +6,16 @@ Given a post URL (e.g. https://www.tiktok.com/@user/video/1234567890) and a
 comment string, this:
 
   1. opens the post in TikTok via a deep-link VIEW intent (reliable),
-  2. opens the comment sheet (taps the comment icon — its content-desc carries a
+  2. PAUSES the video (a single tap on the video) — TikTok plays it on a loop,
+     which keeps the UI perpetually non-idle so `uiautomator dump` fails with
+     "could not get idle state" and returns a STALE tree; pausing lets the UI
+     settle so dumps reflect the real screen,
+  3. opens the comment sheet (taps the comment icon — its content-desc carries a
      live count, so we match on a SUBSTRING),
-  3. focuses the comment input field, types the comment, and submits it.
+  4. focuses the comment input field (capturing its bounds first), types the
+     comment, and submits it. Once the field is focused the blinking cursor keeps
+     the UI non-idle (dump fails again), so the send button is tapped
+     POSITIONALLY — at the right end of the input row — rather than by dumping.
 
 Like tiktok_poster.py this is inherently brittle (it depends on TikTok's current
 UI, locale and A/B variant) and may be against TikTok's Terms of Service. It is
@@ -59,16 +66,31 @@ COMMENT_INPUT_HINTS = (
     "Say something nice",
 )
 
-# The submit control. On some builds it has a real label ("Post"/"Kirim"); on
-# others its content-desc is an UNTRANSLATED resource reference (e.g. "@2131888575")
-# that no label can match — so the send button is also located positionally
-# (the rightmost tappable control in the toolbar just below the input field).
-# See _find_send_button.
-COMMENT_SEND_LABELS = ("Post", "Send", "Kirim", "Posting")
+# The submit control has no reliable label (its content-desc is an untranslated
+# resource ref like "@2131888575") AND the focused input field keeps the UI
+# non-idle so `uiautomator dump` fails — so it can't be found by dumping at all.
+# It is instead tapped POSITIONALLY at the right end of the input row (see
+# comment_on_post / SEND_BTN_X_FRAC below).
 
 # Per-step pacing: how long to wait for a screen, and retries while it loads.
 STEP_DELAY = 2.5
 STEP_RETRIES = 6
+
+# Geometry knobs (fractions of screen size) for the two taps that can't be
+# resolved by `uiautomator dump` (a playing video / focused input keeps the UI
+# non-idle, so dump fails):
+#   - PAUSE_TAP_*: where to tap to pause the looping video. The video fills the
+#     upper-middle; the comment controls are on the right rail, so a center tap
+#     pauses without hitting them.
+#   - SEND_BTN_X_FRAC: the comment send button sits at the right end of the input
+#     row; tap this fraction of the width at the input field's vertical center.
+PAUSE_TAP_X_FRAC = 0.5
+PAUSE_TAP_Y_FRAC = 0.40
+SEND_BTN_X_FRAC = 0.91
+
+# After a successful comment, wait this long (so the submit lands) before
+# force-stopping TikTok.
+COMMENT_SUCCESS_KILL_DELAY = 8.0
 
 
 class TikTokCommentError(Exception):
@@ -150,80 +172,88 @@ def _bounds_of(bounds: str) -> Optional[tuple[int, int, int, int]]:
     return tuple(int(v) for v in m.groups())  # type: ignore[return-value]
 
 
-def _find_send_button(xml: str) -> Optional[tuple[int, int]]:
-    """Locate the comment 'send' control.
+def _tap(serial: Optional[str], x: int, y: int) -> None:
+    run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
-    First tries an exact label (COMMENT_SEND_LABELS) for builds that expose one.
-    Otherwise falls back to geometry: TikTok's send button often has an
-    untranslated `@<digits>` content-desc, so we find the composing input field
-    (an EditText whose text is non-empty and not the placeholder hint) and pick the
-    rightmost clickable control sitting in the toolbar band just below it.
+
+def _force_stop(package: str, serial: Optional[str]) -> None:
+    """Force-stop TikTok (best-effort; never fatal)."""
+    try:
+        run_adb(["shell", "am", "force-stop", package], serial=serial)
+    except PhonePushError:
+        pass
+
+
+def _screen_size(serial: Optional[str]) -> tuple[int, int]:
+    """Return the device (width, height) in pixels from `wm size`."""
+    out = run_adb(["shell", "wm", "size"], serial=serial)
+    m = re.search(r"(\d+)x(\d+)", out)
+    if not m:
+        raise TikTokCommentError(f"could not parse screen size from: {out!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def _pause_video(serial: Optional[str]) -> bool:
     """
-    labelled = _find_tappable(xml, COMMENT_SEND_LABELS)
-    if labelled:
-        return labelled
+    Pause the looping video so the UI goes idle and is dumpable. True if confirmed.
 
+    TikTok plays the post on a loop, which keeps the UI perpetually non-idle so
+    `uiautomator dump` fails ("could not get idle state") and returns a stale
+    tree. A tap on the video toggles play/pause; on a freshly-opened (playing)
+    post this pauses it, letting the UI settle. The comment controls live on the
+    right rail, so this center tap won't hit them.
+
+    The post is still loading for the first moment after the deep link, so a single
+    early tap is a no-op (the video then plays on). We therefore tap, then confirm
+    a dump SUCCEEDS (output contains "dumped to" rather than "could not get idle
+    state"); if not, we wait and tap again. We return as soon as a dump succeeds —
+    tapping again after a successful pause would re-RESUME playback.
+    """
+    w, h = _screen_size(serial)
+    x, y = int(w * PAUSE_TAP_X_FRAC), int(h * PAUSE_TAP_Y_FRAC)
+    for _ in range(STEP_RETRIES):
+        _tap(serial, x, y)
+        time.sleep(1.0)
+        out = run_adb(
+            ["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], serial=serial
+        )
+        if "dumped to" in out.lower():
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def _find_bounds(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int, int, int]]:
+    """Return the (x1,y1,x2,y2) bounds of the first node whose text/desc matches a label."""
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return None
-
-    hints = {h.lower() for h in COMMENT_INPUT_HINTS}
-    input_box: Optional[tuple[int, int, int, int]] = None
+    wanted = {l.lower() for l in labels}
     for node in root.iter("node"):
-        if not node.get("class", "").endswith("EditText"):
-            continue
-        text = (node.get("text") or "").strip()
-        if text and text.lower() not in hints:  # the field we just typed into
+        text = (node.get("text") or "").strip().lower()
+        desc = (node.get("content-desc") or "").strip().lower()
+        if text in wanted or desc in wanted:
             b = _bounds_of(node.get("bounds", ""))
             if b:
-                input_box = b
-                break
-    if input_box is None:
-        return None
-
-    # A uiautomator dump can contain the compose overlay AND the video screen
-    # behind it, so "rightmost clickable" alone snags a background nav button. The
-    # send button is distinguished by an untranslated `@<digits>` content-desc
-    # (this build) — background controls carry real labels — so match on that,
-    # constrained to the toolbar band beside/below the composing input.
-    ix1, iy1, ix2, iy2 = input_box
-    input_mid_x = (ix1 + ix2) // 2
-    band_top, band_bottom = iy1, iy2 + 250
-    best: Optional[tuple[int, int]] = None
-    for node in root.iter("node"):
-        desc = (node.get("content-desc") or "").strip()
-        if not re.fullmatch(r"@\d+", desc):  # untranslated resource ref = send btn
-            continue
-        c = _center_of_bounds(node.get("bounds", ""))
-        if not c:
-            continue
-        cx, cy = c
-        if band_top <= cy <= band_bottom and cx > input_mid_x:
-            if best is None or cx > best[0]:  # rightmost in-band match
-                best = c
-    return best
+                return b
+    return None
 
 
-def _wait_and_tap_send(
+def _wait_for_bounds(
+    labels: tuple[str, ...],
     serial: Optional[str],
     *,
     retries: int = STEP_RETRIES,
     delay: float = STEP_DELAY,
-) -> bool:
-    """Poll for the send button (label or positional) and tap it. True if tapped."""
+) -> Optional[tuple[int, int, int, int]]:
+    """Poll the UI until a node matching `labels` appears; return its bounds (not a tap)."""
     for _ in range(retries):
-        target = _find_send_button(_dump_ui(serial))
-        if target:
-            _tap(serial, *target)
-            time.sleep(delay)
-            return True
+        b = _find_bounds(_dump_ui(serial), labels)
+        if b:
+            return b
         time.sleep(delay)
-    return False
-
-
-def _tap(serial: Optional[str], x: int, y: int) -> None:
-    run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
+    return None
 
 
 def _wait_and_tap(
@@ -348,15 +378,26 @@ def comment_on_post(
             print(f"  wrong account: {e}", flush=True)
             return "wrong_account"
 
-    open_post(url, serial=serial, package=package)
+    pkg = open_post(url, serial=serial, package=package)
+
+    # TikTok loops the video, keeping the UI non-idle so `uiautomator dump` fails
+    # and returns a stale tree — pause it first so every dump below is real.
+    if not _pause_video(serial):
+        return "needs_manual"
 
     # Open the comment sheet (icon's content-desc embeds a count → substring match).
     if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
         return "needs_manual"
 
-    # Focus the comment input field.
-    if not _wait_and_tap(COMMENT_INPUT_HINTS, serial):
+    # Locate the comment input field and capture its bounds BEFORE focusing it:
+    # once focused, the blinking cursor keeps the UI non-idle (dump fails), so we
+    # derive the send-button position from this geometry instead of re-dumping.
+    input_bounds = _wait_for_bounds(COMMENT_INPUT_HINTS, serial)
+    if not input_bounds:
         return "needs_manual"
+    ix1, iy1, ix2, iy2 = input_bounds
+    input_cx, input_cy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
+    _tap(serial, input_cx, input_cy)
     time.sleep(1.0)
 
     typeable = _ascii_for_input(text)
@@ -371,12 +412,20 @@ def comment_on_post(
     _input_line(text, serial)
     time.sleep(0.5)
 
-    if not _wait_and_tap_send(serial):
-        return "needs_manual"
+    # Hide the keyboard (so the send button drops back to the input row), then tap
+    # send positionally — it sits at the right end of that row. We can't dump here
+    # (the focused field blocks it), so this tap is geometric, anchored to the
+    # input field's vertical center.
+    run_adb(["shell", "input", "keyevent", "4"], serial=serial)  # BACK → hide IME
+    time.sleep(1.0)
+    width, _ = _screen_size(serial)
+    _tap(serial, int(width * SEND_BTN_X_FRAC), input_cy)
+    time.sleep(STEP_DELAY)
 
-    # Dismiss the keyboard so the next run starts from a clean screen.
-    run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
-    time.sleep(0.5)
+    # Commented — wait for the submit to land, then close TikTok so it isn't left
+    # running (mirrors the poster's post-success force-stop).
+    time.sleep(COMMENT_SUCCESS_KILL_DELAY)
+    _force_stop(pkg, serial)
     return "commented"
 
 
