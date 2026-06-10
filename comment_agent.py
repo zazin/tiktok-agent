@@ -209,6 +209,20 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
     return succeeded
 
 
+def _clear_comments(*, store_path: Path, failed_only: bool) -> int:
+    """Delete spooled comments WITHOUT re-attempting (talks only to local disk).
+
+    By default removes every surviving file; with failed_only, only those marked
+    "failed". Returns the number deleted.
+    """
+    from core import local_store
+
+    statuses = {"failed"} if failed_only else None
+    removed = local_store.clear(store_path, statuses)
+    _log(f"Clear: removed {removed} {'failed ' if failed_only else ''}comment(s) from {store_path}")
+    return removed
+
+
 def catch_up() -> int:
     """Drain the current comment backlog and mark each 'commented' without acting."""
     from core.comment_source import list_pending, update_status, close, HiveMQSourceError
@@ -255,6 +269,16 @@ def _cli() -> int:
         help="Re-attempt every comment still in the local spool dir, then exit (no HiveMQ)",
     )
     parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Delete spooled comments WITHOUT re-attempting, then exit (no HiveMQ)",
+    )
+    parser.add_argument(
+        "--failed-only",
+        action="store_true",
+        help="With --clear, only delete items marked 'failed' (keep needs_manual/wrong_account/etc.)",
+    )
+    parser.add_argument(
         "--store-dir",
         default=DEFAULT_STORE_DIR,
         help=f"Local spool dir holding one JSON per pending comment (default: {DEFAULT_STORE_DIR})",
@@ -268,6 +292,10 @@ def _cli() -> int:
 
     if args.catch_up:
         catch_up()
+        return 0
+
+    if args.clear:
+        _clear_comments(store_path=store_path, failed_only=args.failed_only)
         return 0
 
     if args.retry:

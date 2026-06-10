@@ -33,7 +33,6 @@ import time
 from pathlib import Path
 
 from core.env_loader import load_env
-from core import local_store
 
 import agent
 import comment_agent
@@ -62,15 +61,14 @@ def _clear_all(args) -> None:
     (failed/needs_manual/wrong_account/etc.), then exit. Talks only to local disk —
     nothing is re-attempted. With --failed-only, keep anything not marked "failed".
     Honors --no-posts/--no-comments. Reads are stateless (no spool)."""
-    statuses = {"failed"} if args.failed_only else None
     label = "failed" if args.failed_only else "spooled"
     _log(f"Clear: deleting {label} local work (no HiveMQ, no re-attempt)...")
     if not args.no_posts:
-        n = local_store.clear(Path(args.posts_store_dir), statuses)
-        _log(f"posts: removed {n} from {args.posts_store_dir}")
+        _log("posts:")
+        agent._clear_posts(store_path=Path(args.posts_store_dir), failed_only=args.failed_only)
     if not args.no_comments:
-        n = local_store.clear(Path(args.comments_store_dir), statuses)
-        _log(f"comments: removed {n} from {args.comments_store_dir}")
+        _log("comments:")
+        comment_agent._clear_comments(store_path=Path(args.comments_store_dir), failed_only=args.failed_only)
     _log("Clear done.")
 
 

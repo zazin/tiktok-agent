@@ -300,6 +300,20 @@ def _retry_posts(*, serial: Optional[str], auto_post: bool, dest_dir: str, store
     return succeeded
 
 
+def _clear_posts(*, store_path: Path, failed_only: bool) -> int:
+    """Delete spooled posts WITHOUT re-attempting (talks only to local disk).
+
+    By default removes every surviving file; with failed_only, only those marked
+    "failed". Returns the number deleted.
+    """
+    from core import local_store
+
+    statuses = {"failed"} if failed_only else None
+    removed = local_store.clear(store_path, statuses)
+    _log(f"Clear: removed {removed} {'failed ' if failed_only else ''}post(s) from {store_path}")
+    return removed
+
+
 def catch_up(*, source: str, folder: str, state_path: Path) -> int:
     """
     Skip the current backlog WITHOUT posting it.
@@ -355,6 +369,16 @@ def _cli() -> int:
         help="Re-attempt every post still in the local spool dir, then exit (no HiveMQ)",
     )
     parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Delete spooled posts WITHOUT re-attempting, then exit (no HiveMQ)",
+    )
+    parser.add_argument(
+        "--failed-only",
+        action="store_true",
+        help="With --clear, only delete items marked 'failed' (keep needs_manual/wrong_account/etc.)",
+    )
+    parser.add_argument(
         "--store-dir",
         default=DEFAULT_STORE_DIR,
         help=f"Local spool dir holding one JSON per pending post (default: {DEFAULT_STORE_DIR})",
@@ -366,6 +390,10 @@ def _cli() -> int:
 
     if args.catch_up:
         catch_up(source=args.source, folder=args.folder, state_path=state_path)
+        return 0
+
+    if args.clear:
+        _clear_posts(store_path=store_path, failed_only=args.failed_only)
         return 0
 
     if args.retry:

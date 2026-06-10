@@ -52,6 +52,7 @@ uv run tiktok-agent --watch        # event-driven: stays subscribed, auto-posts 
 uv run tiktok-agent --once         # drain the current backlog once and exit
 uv run tiktok-agent --watch --no-auto-post   # push to phone only, leave messages unacked
 uv run tiktok-agent --retry                  # re-attempt posts still in queue_posts/ (no HiveMQ)
+uv run tiktok-agent --clear                  # delete spooled posts WITHOUT re-attempting (--failed-only keeps non-'failed')
 uv run tiktok-agent --once --source imagekit # legacy: poll the ImageKit folder instead
 uv run tiktok-hivemq                         # inspect the HiveMQ queue (peek the backlog, no ack)
 uv run tiktok-source --folder /tiktok        # inspect the legacy ImageKit queue
@@ -63,6 +64,7 @@ uv run tiktok-commenter --catch-up                 # drain the comment backlog W
 uv run tiktok-commenter --watch                    # event-driven: comment on each tiktok/comments message instantly
 uv run tiktok-commenter --once --dry-run           # drain once, log what it would comment, DON'T submit
 uv run tiktok-commenter --retry                    # re-attempt comments still in queue_comments/ (no HiveMQ)
+uv run tiktok-commenter --clear                    # delete spooled comments WITHOUT re-attempting (--failed-only keeps non-'failed')
 
 # Comment-reader (read a post's comments back to the backend; see "Comment-reader" below):
 uv run tiktok-comment-reader --catch-up            # drain the read-job backlog WITHOUT reading (run once first)
@@ -93,9 +95,12 @@ thread so one `tiktok-watch-all` command drains all three topics at once; the
 `core/device_lock.py` flock keeps their device flows serialized. Its `--retry` is a
 one-shot that delegates to `agent._retry_posts` + `comment_agent._retry_comments`
 (reads are stateless, nothing to retry), honoring `--no-posts`/`--no-comments`. Its
-`--clear` is a one-shot that deletes the locally-spooled posts + comments
-(`local_store.clear`) **without** re-attempting — `--failed-only` restricts it to
-items marked `failed`, and `--no-posts`/`--no-comments` scope which spool is wiped. The shared, non-CLI library modules live in the **`core/`** package:
+`--clear` is a one-shot that delegates to `agent._clear_posts` +
+`comment_agent._clear_comments` (both wrapping `local_store.clear`) to delete the
+locally-spooled posts + comments **without** re-attempting — `--failed-only` restricts
+it to items marked `failed`, and `--no-posts`/`--no-comments` scope which spool is wiped.
+The individual `tiktok-agent`/`tiktok-commenter` CLIs carry the same `--clear` /
+`--failed-only` for a single spool. The shared, non-CLI library modules live in the **`core/`** package:
 `core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
 `core/adb_pusher.py`, `core/comment_source.py`, `core/comment_read_source.py`,
 `core/local_store.py`, `core/device_lock.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
