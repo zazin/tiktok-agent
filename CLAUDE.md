@@ -432,7 +432,11 @@ between the two repos).
   `uiautomator dump` if rows stop parsing. Three calibration facts: (1) **image/sticker
   comments have no text node** → skipped (can't be replied to); (2) a row whose author
   **scrolled partly off** resolves to no author → dropped (re-captured on an adjacent
-  pass); (3) **nested replies stay collapsed** → only top-level comments are scraped.
+  pass); (3) **nested replies are excluded** — collapsed reply threads ("Lihat N
+  balasan") aren't scraped at all, and replies shown *inline* (e.g. a just-posted one)
+  are dropped by **indentation**: a row whose author sits more than
+  `REPLY_INDENT_TOLERANCE` px right of the left-most (top-level) author column is a
+  reply, not a top-level comment. So only top-level comments are returned.
   `collect_comments` scrolls (`_swipe_sheet`), deduping by `(author, text)`.
 - **Stateless + idempotent:** no local spool, no `--retry` — re-reading a post just
   re-publishes its current comments, and a failed read is left unacked so the broker
@@ -441,7 +445,7 @@ between the two repos).
   `(author + text)` since TikTok exposes no stable comment id.
 - **Tuning knobs:** `DEFAULT_MAX_COMMENTS` (in `comment_reader_agent.py`); and in
   `tiktok_commenter.py`: `ROW_AUTHOR_ID`/`ROW_TEXT_ID`/`REPLY_BTN_LABELS`,
-  `SHEET_CONTENT_MIN_X`, `SCROLL_*` (swipe geometry + loop bounds).
+  `SHEET_CONTENT_MIN_X`, `REPLY_INDENT_TOLERANCE`, `SCROLL_*` (swipe geometry + loop bounds).
 
 ## Cross-repo coupling (easy to break)
 

@@ -118,6 +118,11 @@ REPLY_BTN_LABELS = ("balas", "reply")
 # the sheet (e.g. the post caption, also id/title) — ignored so they aren't mistaken
 # for a commenter's name.
 SHEET_CONTENT_MIN_X = 100
+# Nested replies are indented further right than top-level comments (e.g. author x1
+# ~174 for top-level vs ~241 for a reply on a 1080px device). A row whose author sits
+# more than this many px right of the left-most (top-level) author on screen is a
+# reply, not a top-level comment, and is excluded — we read/reply to top-level only.
+REPLY_INDENT_TOLERANCE = 40
 
 # Scrolling the comment sheet to read more (geometry + loop bounds), calibrated on-device.
 SCROLL_X_FRAC = 0.5
@@ -151,15 +156,17 @@ def parse_comment_rows(xml: str) -> list[dict]:
     and text are the matching id nodes that fall BETWEEN the previous Reply button and
     this one (so a row's parts can't be stolen by an adjacent row). A row whose author
     can't be resolved (it scrolled partly off the top) is dropped — it is captured
-    cleanly on an adjacent scroll position.
+    cleanly on an adjacent scroll position. **Nested replies** (indented right of the
+    top-level author column by more than ``REPLY_INDENT_TOLERANCE``) are excluded — only
+    top-level comments are returned.
     """
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return []
 
-    authors: list[tuple[int, str]] = []   # (y_top, text)
-    texts: list[tuple[int, str]] = []      # (y_top, text)
+    authors: list[tuple[int, int, str]] = []   # (y_top, x1, text)
+    texts: list[tuple[int, str]] = []           # (y_top, text)
     replies: list[tuple[int, tuple[int, int]]] = []  # (y_top, center)
     for node in root.iter("node"):
         b = _bounds_of(node.get("bounds", ""))
@@ -173,21 +180,33 @@ def parse_comment_rows(xml: str) -> list[dict]:
         if label in REPLY_BTN_LABELS:
             replies.append((y1, ((x1 + x2) // 2, (y1 + y2) // 2)))
         elif rid == ROW_AUTHOR_ID and text and x1 >= SHEET_CONTENT_MIN_X:
-            authors.append((y1, text))
+            authors.append((y1, x1, text))
         elif rid == ROW_TEXT_ID and text and x1 >= SHEET_CONTENT_MIN_X:
             texts.append((y1, text))
+
+    # The top-level author column is the left-most author indent on screen; rows whose
+    # author sits further right are nested replies (skipped).
+    base_x = min((x for (_, x, _) in authors), default=0)
+    top_level_max_x = base_x + REPLY_INDENT_TOLERANCE
 
     replies.sort()
     rows: list[dict] = []
     prev_reply_y = -1
     for ry, rxy in replies:
-        author = next((t for (y, t) in reversed(authors) if prev_reply_y < y <= ry), None)
+        author = next(
+            ((x, t) for (y, x, t) in reversed(authors) if prev_reply_y < y <= ry), None
+        )
+        prev_reply_y_for_next = ry
         if author is None:
-            prev_reply_y = ry
+            prev_reply_y = prev_reply_y_for_next
             continue  # partial row (author scrolled off) — captured on another pass
+        author_x, author_text = author
+        if author_x > top_level_max_x:
+            prev_reply_y = prev_reply_y_for_next
+            continue  # nested reply, not a top-level comment
         body = next((t for (y, t) in reversed(texts) if prev_reply_y < y <= ry), None)
-        rows.append({"author": author, "text": body, "reply_xy": rxy})
-        prev_reply_y = ry
+        rows.append({"author": author_text, "text": body, "reply_xy": rxy})
+        prev_reply_y = prev_reply_y_for_next
     return rows
 
 
