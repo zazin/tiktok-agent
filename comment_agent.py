@@ -90,15 +90,19 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
             post_url = rec["post_url"]
             comment = rec["comment"]
             account = rec.get("account")
-            _log(f"Comment on {post_url}")
+            reply_to = rec.get("reply_to")
+            _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
             # Always store on receive (except dry-run), before touching the phone.
             if not dry_run:
                 local_store.store(
-                    store_path, post_url, {"post_url": post_url, "comment": comment, "account": account}
+                    store_path,
+                    post_url,
+                    {"post_url": post_url, "comment": comment, "account": account, "reply_to": reply_to},
                 )
             try:
                 status = comment_on_post(
-                    post_url, comment, serial=serial, package=package, dry_run=dry_run, account=account
+                    post_url, comment, serial=serial, package=package, dry_run=dry_run,
+                    account=account, reply_to=reply_to,
                 )
                 _log(f"  tiktok: {status}")
                 if not dry_run:
@@ -127,15 +131,19 @@ def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, stor
         post_url = rec["post_url"]
         comment = rec["comment"]
         account = rec.get("account")
-        _log(f"Comment on {post_url}")
+        reply_to = rec.get("reply_to")
+        _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
         # Always store on receive (except dry-run), before touching the phone.
         if not dry_run:
             local_store.store(
-                store_path, post_url, {"post_url": post_url, "comment": comment, "account": account}
+                store_path,
+                post_url,
+                {"post_url": post_url, "comment": comment, "account": account, "reply_to": reply_to},
             )
         try:
             status = comment_on_post(
-                post_url, comment, serial=serial, package=package, dry_run=dry_run, account=account
+                post_url, comment, serial=serial, package=package, dry_run=dry_run,
+                account=account, reply_to=reply_to,
             )
             _log(f"  tiktok: {status}")
             # In dry-run, leave the message unacked (return None) so it isn't consumed.
@@ -178,6 +186,7 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
         payload = entry.get("payload") or {}
         comment = payload.get("comment")
         account = payload.get("account")
+        reply_to = payload.get("reply_to")
         if not post_url or not comment:
             _log(f"  SKIP {post_url}: missing post_url/comment in stored payload")
             continue
@@ -185,7 +194,8 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
         _log(f"Retry {post_url} (attempt {int(entry.get('attempts', 0)) + 1})")
         try:
             status = comment_on_post(
-                post_url, comment, serial=serial, package=package, dry_run=False, account=account
+                post_url, comment, serial=serial, package=package, dry_run=False,
+                account=account, reply_to=reply_to,
             )
             _log(f"  tiktok: {status}")
             _resolve(store_path, post_url, status)

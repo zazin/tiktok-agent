@@ -128,6 +128,22 @@ def tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 
 
+def swipe(
+    serial: Optional[str],
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    duration_ms: int = 400,
+) -> None:
+    """Swipe from (x1,y1) to (x2,y2) over `duration_ms` (e.g. to scroll a list)."""
+    run_adb(
+        ["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration_ms)],
+        serial=serial,
+    )
+
+
 def force_stop(package: Optional[str], serial: Optional[str]) -> None:
     """Force-stop TikTok (best-effort; never fatal).
 

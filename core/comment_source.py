@@ -13,10 +13,13 @@ the queue's API as module-level functions.
 
 Message contract (published by the producer, QoS 1, retained false):
   {"PostURL": "https://www.tiktok.com/@u/video/123", "Comment": "Nice!",
-   "Account": "@handle"}
+   "Account": "@handle", "ReplyTo": {"author": "@someone", "text": "their comment"}}
 There is NO id field — MQTT acking uses the message's mid, and status is keyed by
 PostURL. ``Account`` is optional — when set, the commenter switches to that TikTok
-account before commenting (see tiktok_profile.py).
+account before commenting (see tiktok_profile.py). ``ReplyTo`` is optional — when set
+(must carry a non-empty ``author``), the comment is submitted as a REPLY to that
+existing comment instead of a top-level comment; ``ReplyTo.text`` (a substring of the
+target comment) is optional and only disambiguates when an author has several comments.
 
 Credentials (read from the environment / .env):
   - HIVEMQ_HOST / HIVEMQ_PORT / HIVEMQ_USERNAME / HIVEMQ_PASSWORD  — as hivemq_source
@@ -64,7 +67,21 @@ def _parse(message: mqtt.MQTTMessage, warn) -> Optional[dict]:
         warn(f"missing required 'Comment' field (PostURL={post_url})", message)
         return None
     account = payload.get("Account")  # optional target TikTok @handle
-    return {"post_url": str(post_url), "comment": str(comment), "account": account}
+    reply_to = None
+    raw_reply = payload.get("ReplyTo")
+    if isinstance(raw_reply, dict) and raw_reply.get("author"):
+        reply_to = {
+            "author": str(raw_reply["author"]),
+            "text": str(raw_reply["text"]) if raw_reply.get("text") else None,
+        }
+    elif raw_reply:
+        warn(f"ignoring malformed 'ReplyTo' (need an object with 'author') for {post_url}", message)
+    return {
+        "post_url": str(post_url),
+        "comment": str(comment),
+        "account": account,
+        "reply_to": reply_to,
+    }
 
 
 _QUEUE = MqttWorkQueue(

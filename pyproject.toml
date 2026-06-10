@@ -12,6 +12,7 @@ tiktok-source = "imagekit_source:_cli"
 tiktok-hivemq = "hivemq_source:_cli"
 tiktok-post = "tiktok_poster:_cli"
 tiktok-commenter = "comment_agent:_cli"
+tiktok-comment-reader = "comment_reader_agent:_cli"
 tiktok-profile = "tiktok_profile:_cli"
 
 [tool.uv]
@@ -30,6 +31,7 @@ include = [
     "tiktok_poster.py",
     "tiktok_commenter.py",
     "comment_agent.py",
+    "comment_reader_agent.py",
     "tiktok_profile.py",
     # shared, non-CLI library modules
     "core/*.py",

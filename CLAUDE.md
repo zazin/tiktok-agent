@@ -55,6 +55,17 @@ uv run tiktok-commenter --catch-up                 # drain the comment backlog W
 uv run tiktok-commenter --watch                    # event-driven: comment on each tiktok/comments message instantly
 uv run tiktok-commenter --once --dry-run           # drain once, log what it would comment, DON'T submit
 uv run tiktok-commenter --retry                    # re-attempt comments still in queue_comments/ (no HiveMQ)
+
+# Comment-reader (read a post's comments back to the backend; see "Comment-reader" below):
+uv run tiktok-comment-reader --catch-up            # drain the read-job backlog WITHOUT reading (run once first)
+uv run tiktok-comment-reader --watch               # event-driven: scrape each tiktok/comments-read post instantly
+uv run tiktok-comment-reader --once --max 20       # drain once, scrape up to 20 comments/post, publish the lists
+```
+
+`tiktok_commenter.py` is also a direct-run helper for a single post (no MQTT):
+```bash
+uv run python tiktok_commenter.py <url> "<comment>"                                   # top-level comment
+uv run python tiktok_commenter.py <url> "<reply>" --reply-to-author @who --reply-to-text "..."  # reply to a comment
 ```
 
 There are **no tests, linter, or build step** configured. The wheel `include`
@@ -64,13 +75,13 @@ modules **inside `core/`** are picked up automatically).
 
 ### Layout: top-level CLIs + `core/` package
 
-The six console-script entry points (`agent.py`, `imagekit_source.py`,
-`hivemq_source.py`, `tiktok_poster.py`, `comment_agent.py`, `tiktok_profile.py`)
-and `tiktok_commenter.py` (a direct-run helper) live at the **top level**. The
-shared, non-CLI library modules live in the **`core/`** package:
+The seven console-script entry points (`agent.py`, `imagekit_source.py`,
+`hivemq_source.py`, `tiktok_poster.py`, `comment_agent.py`, `comment_reader_agent.py`,
+`tiktok_profile.py`) and `tiktok_commenter.py` (a direct-run helper) live at the
+**top level**. The shared, non-CLI library modules live in the **`core/`** package:
 `core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
-`core/adb_pusher.py`, `core/comment_source.py`, `core/local_store.py`,
-`core/env_loader.py`. Top-level modules import them as `from core.x import …`;
+`core/adb_pusher.py`, `core/comment_source.py`, `core/comment_read_source.py`,
+`core/local_store.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
 modules inside `core/` import siblings with relative imports (`from .x import …`)
 and may still reach back to top-level modules (e.g. `core/imagekit_agent.py`
 imports the top-level `imagekit_source`/`tiktok_poster`).
@@ -144,7 +155,17 @@ no image handling, no AI):
 |--------|------|-----------|
 | `comment_agent.py` | Orchestrator + CLI: drain the comment topic → open post by URL → submit comment → report status. `--watch` (event-driven) / `--once` / `--catch-up` | — |
 | `core/comment_source.py` | Thin wiring for the **comment** topic: comment-specific config + `_parse`, re-exporting its own `MqttWorkQueue` instance (own topic/client-id/status, `PostURL`+`Comment` parse) | `HiveMQSourceError` (from `mqtt_queue`) |
-| `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment (comment-specific flow/labels; primitives from `tiktok_ui`) | `TikTokCommentError` |
+| `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment **or reply** (`reply_to`); also `read_comments` (scrape the sheet) + `parse_comment_rows`/`collect_comments` shared by the reader. Comment-specific flow/labels; primitives from `tiktok_ui` | `TikTokCommentError` |
+
+The **comment-reader** is a third independent consumer — the read half of the
+comment-reply loop. The backend can't read a post's comments (no TikTok API); only the
+device can, via the UI. It drains read-jobs, scrapes each post's comments, and publishes
+the list back so the backend can generate replies (sent to `tiktok-commenter` with `ReplyTo`):
+
+| Module | Role | Error type |
+|--------|------|-----------|
+| `comment_reader_agent.py` | Orchestrator + CLI: drain `tiktok/comments-read` → `read_comments` → publish `{PostURL, comments, count, ts}` to `tiktok/comments-list`. `--watch`/`--once`/`--catch-up`. Read-only + idempotent: no local spool / `--retry` (a failed read is left unacked and redelivered) | — |
+| `core/comment_read_source.py` | Thin wiring for the **read** topic: read-specific config + `_parse` (`PostURL`+optional `max`), own `MqttWorkQueue` (own topic/client-id, output topic = `comments-list`), re-exporting `list_pending`/`publish_comments`/`close`/`watch` | `HiveMQSourceError` (from `mqtt_queue`) |
 
 `run_adb()` in `adb_pusher.py` is the single chokepoint for **all** adb calls
 (push, shell, intents, UI dumps, taps). The shared `tiktok_ui.py` primitives import
@@ -309,11 +330,22 @@ session** (`HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter`, so it runs as a separate
 process and never collides with `tiktok-agent`'s session). No image handling, no
 AI — the exact comment text is in the message.
 
-- **Message contract:** `{"PostURL": "...", "Comment": "...", "Account": "@handle"}`
+- **Message contract:** `{"PostURL": "...", "Comment": "...", "Account": "@handle",
+  "ReplyTo": {"author": "@someone", "text": "their comment"}}`
   — **no `id`, no `CreatedAt`.** MQTT acking uses the message's `mid`, not the
   payload, so no `id` is needed; status is keyed by `PostURL`. `Account` is optional
-  (switch to that TikTok account first, see Multi-account above). `_parse` drops +
+  (switch to that TikTok account first, see Multi-account above). **`ReplyTo` is
+  optional** — when set (must carry a non-empty `author`), the comment is submitted as a
+  **reply** to that existing comment instead of a top-level comment; `ReplyTo.text` (a
+  substring of the target comment) only disambiguates when one author has several
+  comments. Absent `ReplyTo` = top-level comment (unchanged behavior). `_parse` drops +
   logs any message missing a non-empty `PostURL` or `Comment`.
+- **Reply flow (`reply_to`):** after opening the comment sheet, `comment_on_post` finds
+  the target comment row (matching author + optional text substring, scrolling the sheet
+  as needed via `parse_comment_rows`/`_find_and_tap_reply`) and taps its **Balas/Reply**
+  button — which auto-focuses the input ("Membalas <author>") — then types + sends exactly
+  like a top-level comment. If the target can't be found it returns the new status
+  **`comment_not_found`** (force-stop, kept for `--retry`) without submitting.
 - **Flow (`comment_agent.py` → `tiktok_commenter.comment_on_post`):** deep-link
   open the post (`am start -a android.intent.action.VIEW -d <url> -p <pkg>`, the
   reliable part) → **pause the video** (`_pause_video`) → tap the comment icon (its
@@ -370,6 +402,47 @@ AI — the exact comment text is in the message.
 - **`--catch-up`:** drains the comment backlog and marks each `commented` (publish
   + ack) **without commenting** — run once before the first `--watch`.
 
+### Comment-reader (`tiktok-comment-reader`, the read half of the reply loop)
+
+A backend that generates **reply** text first needs to *read* the post's existing
+comments — but it has no TikTok API, so only the device can see them (via the UI). This
+third consumer closes that gap: it drains read-jobs, scrapes a post's comments on the
+phone, and publishes the list back; the backend then generates a positive reply per
+comment and sends each to `tiktok-commenter` as a reply-job (`ReplyTo`). The full
+round-trip is **read-job → comment-list → reply-job**, all over HiveMQ (the only channel
+between the two repos).
+
+- **Read-job contract (in):** `{"PostURL": "...", "max": 10}` on `tiktok/comments-read`
+  (`HIVEMQ_COMMENT_READ_TOPIC`), drained by its **own** persistent session
+  (`HIVEMQ_COMMENT_READ_CLIENT_ID=tiktok-comment-reader`). `max` is optional.
+- **Comment-list contract (out):** `{"PostURL": "...", "comments": [{"author": "...",
+  "text": "..."}], "count": N, "ts": ...}` published to `tiktok/comments-list`
+  (`HIVEMQ_COMMENT_LIST_TOPIC`); the backend subscribes here. On a read failure the same
+  message is published with `comments: []` and an `error` field.
+- **Comment cap (`max`):** precedence is the read-job's `max` → `--max` → `$COMMENT_READ_MAX`
+  → `DEFAULT_MAX_COMMENTS` (10). TikTok's sheet defaults to a **top/relevance sort**, so the
+  first N scraped are the most-engaged comments. The scrape stops at the cap **or** after
+  `SCROLL_STABLE_PASSES` swipes with no new rows (end of thread).
+- **Scraping (the calibrated, brittle part — `parse_comment_rows`):** with the video
+  paused the comment sheet **is** dumpable. Each row is anchored on its **Balas/Reply**
+  button (matched by label, stable); the author (`ROW_AUTHOR_ID`/`id/title` text) and body
+  (`ROW_TEXT_ID`/`id/enp` text) are the id nodes falling **between the previous Reply
+  button and this one** (so "Lihat N balasan" and adjacent rows can't be mis-attributed).
+  These resource-id leaf names are **obfuscated and WILL drift** — re-verify with a real
+  `uiautomator dump` if rows stop parsing. Three calibration facts: (1) **image/sticker
+  comments have no text node** → skipped (can't be replied to); (2) a row whose author
+  **scrolled partly off** resolves to no author → dropped (re-captured on an adjacent
+  pass); (3) **nested replies stay collapsed** → only top-level comments are scraped.
+  `collect_comments` scrolls (`_swipe_sheet`), deduping by `(author, text)`.
+- **Stateless + idempotent:** no local spool, no `--retry` — re-reading a post just
+  re-publishes its current comments, and a failed read is left unacked so the broker
+  redelivers it. All stateful policy (which posts to read, which comments deserve a reply,
+  dedup of already-replied) lives on the **backend** — the correlation key is
+  `(author + text)` since TikTok exposes no stable comment id.
+- **Tuning knobs:** `DEFAULT_MAX_COMMENTS` (in `comment_reader_agent.py`); and in
+  `tiktok_commenter.py`: `ROW_AUTHOR_ID`/`ROW_TEXT_ID`/`REPLY_BTN_LABELS`,
+  `SHEET_CONTENT_MIN_X`, `SCROLL_*` (swipe geometry + loop bounds).
+
 ## Cross-repo coupling (easy to break)
 
 - **MQTT message contract (primary):** the pipeline publishes (QoS 1, retained
@@ -384,11 +457,18 @@ AI — the exact comment text is in the message.
   on both repos.)
 - **Comment message contract (`tiktok-commenter`):** a producer publishes (QoS 1,
   retained false) JSON `{"PostURL": "https://www.tiktok.com/@u/video/<id>",
-  "Comment": "...", "Account": "@handle"}` to `tiktok/comments`
-  (`HIVEMQ_COMMENT_TOPIC`); the agent reports `{PostURL, status, ts}` on
-  `tiktok/comment-status` (`HIVEMQ_COMMENT_STATUS_TOPIC`). No `id` field; `Account`
-  is optional. Renaming a field, changing the topic, or dropping to QoS 0 silently
-  breaks the consumer.
+  "Comment": "...", "Account": "@handle", "ReplyTo": {"author": "@u", "text": "..."}}`
+  to `tiktok/comments` (`HIVEMQ_COMMENT_TOPIC`); the agent reports `{PostURL, status,
+  ts}` on `tiktok/comment-status` (`HIVEMQ_COMMENT_STATUS_TOPIC`). No `id` field;
+  `Account` and `ReplyTo` are optional (`ReplyTo` present = post a reply to that comment).
+  Renaming a field, changing the topic, or dropping to QoS 0 silently breaks the consumer.
+- **Comment-reader contract (`tiktok-comment-reader`):** the backend publishes read-jobs
+  `{"PostURL": "...", "max": 10}` (QoS 1) to `tiktok/comments-read`
+  (`HIVEMQ_COMMENT_READ_TOPIC`); the device publishes the scraped list `{"PostURL", "comments":
+  [{"author", "text"}], "count", "ts"}` to `tiktok/comments-list` (`HIVEMQ_COMMENT_LIST_TOPIC`),
+  which the backend subscribes to. The correlation key tying a listed comment to its reply-job
+  is `(author + text)` — TikTok exposes no stable comment id. Renaming a field, changing a
+  topic, or dropping to QoS 0 silently breaks the loop.
 - **ImageKit `ImageURL`:** the agent downloads the image from the public CDN URL the
   pipeline put in each message.
 - **Legacy ImageKit coupling (`--source imagekit` only):** filename convention

@@ -322,6 +322,30 @@ class MqttWorkQueue:
         if msg is not None:
             self._client.ack(msg.mid, msg.qos)
 
+    def publish_result(self, key: str, body: dict, *, timeout: float = 10.0) -> None:
+        """
+        Publish a caller-supplied JSON ``body`` to the output (status) topic and ack
+        the work message keyed by ``key`` — like ``update_status`` but for a richer
+        result payload (e.g. a comment-reader publishing the scraped comment list,
+        not just a {key, status} pair).
+
+        Raises:
+            HiveMQSourceError: If not connected or the publish fails.
+        """
+        if self._client is None or self._config is None:
+            raise HiveMQSourceError("publish_result called before a successful list_pending/connect")
+
+        info = self._client.publish(self._config.status_topic, json.dumps(body), qos=1)
+        try:
+            info.wait_for_publish(timeout)
+        except (ValueError, RuntimeError) as e:
+            raise HiveMQSourceError(f"Failed to publish result for {key}: {e}") from e
+
+        with self._lock:
+            msg = self._pending_msgs.pop(key, None)
+        if msg is not None:
+            self._client.ack(msg.mid, msg.qos)
+
     def close(self) -> None:
         """
         Disconnect the persistent client and release any still-unacked messages back
