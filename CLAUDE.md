@@ -45,6 +45,7 @@ uv run tiktok-watch-all --catch-up   # drain EVERY backlog WITHOUT acting (run o
 uv run tiktok-watch-all              # event-driven: watch all three topics at once (Ctrl-C stops all)
 uv run tiktok-watch-all --no-reads   # skip a feature (also --no-posts / --no-comments)
 uv run tiktok-watch-all --retry      # one-shot: re-attempt spooled posts + comments (no HiveMQ), then exit
+uv run tiktok-watch-all --clear      # one-shot: delete spooled posts + comments WITHOUT re-attempting (--failed-only / --no-posts / --no-comments)
 
 uv run tiktok-agent --catch-up     # drain current backlog WITHOUT posting (run once first)
 uv run tiktok-agent --watch        # event-driven: stays subscribed, auto-posts each message instantly
@@ -91,7 +92,10 @@ it imports the three watch entrypoints (`agent._watch_hivemq`,
 thread so one `tiktok-watch-all` command drains all three topics at once; the
 `core/device_lock.py` flock keeps their device flows serialized. Its `--retry` is a
 one-shot that delegates to `agent._retry_posts` + `comment_agent._retry_comments`
-(reads are stateless, nothing to retry), honoring `--no-posts`/`--no-comments`. The shared, non-CLI library modules live in the **`core/`** package:
+(reads are stateless, nothing to retry), honoring `--no-posts`/`--no-comments`. Its
+`--clear` is a one-shot that deletes the locally-spooled posts + comments
+(`local_store.clear`) **without** re-attempting — `--failed-only` restricts it to
+items marked `failed`, and `--no-posts`/`--no-comments` scope which spool is wiped. The shared, non-CLI library modules live in the **`core/`** package:
 `core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
 `core/adb_pusher.py`, `core/comment_source.py`, `core/comment_read_source.py`,
 `core/local_store.py`, `core/device_lock.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;

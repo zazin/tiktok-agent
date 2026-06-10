@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from core.env_loader import load_env
+from core import local_store
 
 import agent
 import comment_agent
@@ -54,6 +55,23 @@ def _catch_up_all() -> None:
     _log("read-jobs:")
     comment_reader_agent.catch_up()
     _log("Catch-up done. Now run `tiktok-watch-all` to start watching.")
+
+
+def _clear_all(args) -> None:
+    """Delete every locally-spooled post and comment that still needs attention
+    (failed/needs_manual/wrong_account/etc.), then exit. Talks only to local disk —
+    nothing is re-attempted. With --failed-only, keep anything not marked "failed".
+    Honors --no-posts/--no-comments. Reads are stateless (no spool)."""
+    statuses = {"failed"} if args.failed_only else None
+    label = "failed" if args.failed_only else "spooled"
+    _log(f"Clear: deleting {label} local work (no HiveMQ, no re-attempt)...")
+    if not args.no_posts:
+        n = local_store.clear(Path(args.posts_store_dir), statuses)
+        _log(f"posts: removed {n} from {args.posts_store_dir}")
+    if not args.no_comments:
+        n = local_store.clear(Path(args.comments_store_dir), statuses)
+        _log(f"comments: removed {n} from {args.comments_store_dir}")
+    _log("Clear done.")
 
 
 def _retry_all(args) -> None:
@@ -96,6 +114,16 @@ def _cli() -> int:
         action="store_true",
         help="Re-attempt locally-spooled posts + comments (no HiveMQ), then exit (reads have no spool)",
     )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Delete locally-spooled posts + comments WITHOUT re-attempting, then exit (no HiveMQ)",
+    )
+    parser.add_argument(
+        "--failed-only",
+        action="store_true",
+        help="With --clear, only delete items marked 'failed' (keep needs_manual/wrong_account/etc.)",
+    )
     # Shared device options
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
     parser.add_argument("--package", default=None, help="Override TikTok package name (comments + reads)")
@@ -120,6 +148,10 @@ def _cli() -> int:
 
     if args.catch_up:
         _catch_up_all()
+        return 0
+
+    if args.clear:
+        _clear_all(args)
         return 0
 
     if args.retry:

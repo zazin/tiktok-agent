@@ -106,6 +106,29 @@ def remove(directory: Path, key: str) -> None:
     _path(directory, key).unlink(missing_ok=True)
 
 
+def clear(directory: Path, statuses: Optional[set[str]] = None) -> int:
+    """Delete spool files and return how many were removed.
+
+    With ``statuses`` given, only entries whose ``status`` is in the set are deleted
+    (e.g. ``{"failed"}``); otherwise **every** surviving spool file is removed. Used by
+    ``--clear`` to wipe items still needing attention without re-attempting them.
+    """
+    if not directory.is_dir():
+        return 0
+    removed = 0
+    for path in directory.glob("*.json"):
+        if statuses is not None:
+            entry = _read(path)
+            if entry is None or entry.get("status") not in statuses:
+                continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def items(directory: Path) -> list[dict]:
     """Return every surviving spool entry, oldest-first (for the retry loop)."""
     if not directory.is_dir():
