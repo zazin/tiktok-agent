@@ -23,6 +23,7 @@ import time
 from typing import Optional
 
 from core.adb_pusher import run_adb, PhonePushError
+from core.device_lock import device_lock
 from tiktok_profile import ensure_account, TikTokProfileError
 from core.tiktok_ui import (
     TIKTOK_PACKAGES,
@@ -205,39 +206,42 @@ def post(
     Raises:
         TikTokPostError: If Phase 1 itself fails (no TikTok / unshareable image).
     """
-    if account:
-        try:
-            ensure_account(account, serial=serial, package=package)
-        except TikTokProfileError as e:
-            print(f"  wrong account: {e}", flush=True)
-            _force_stop(package, serial)  # don't leave TikTok open on an error
-            return "wrong_account"
+    # Serialize the whole flow against the single device — only one consumer
+    # process may drive the phone at a time (see core/device_lock.py).
+    with device_lock(serial):
+        if account:
+            try:
+                ensure_account(account, serial=serial, package=package)
+            except TikTokProfileError as e:
+                print(f"  wrong account: {e}", flush=True)
+                _force_stop(package, serial)  # don't leave TikTok open on an error
+                return "wrong_account"
 
-    pkg = open_in_tiktok(remote_path, serial=serial, package=package)
-    time.sleep(STEP_DELAY)
+        pkg = open_in_tiktok(remote_path, serial=serial, package=package)
+        time.sleep(STEP_DELAY)
 
-    if not auto_post:
-        return "composer_open"
+        if not auto_post:
+            return "composer_open"
 
-    post_text = build_post_text(caption, description)
+        post_text = build_post_text(caption, description)
 
-    # Phase 2 — walk the ordered post flow. The final step is the actual publish;
-    # type the post text (if any) on the screen just before it.
-    last_idx = len(POST_FLOW_STEPS) - 1
-    for idx, labels in enumerate(POST_FLOW_STEPS):
-        if idx == last_idx and post_text:
-            _type_caption(post_text, serial)  # best-effort, never fatal
-        if not _wait_and_tap(labels, serial):
-            # A screen we didn't recognize — force-stop TikTok rather than leaving
-            # the composer open; the message stays spooled for --retry.
-            _force_stop(pkg, serial)
-            return "needs_manual"
+        # Phase 2 — walk the ordered post flow. The final step is the actual publish;
+        # type the post text (if any) on the screen just before it.
+        last_idx = len(POST_FLOW_STEPS) - 1
+        for idx, labels in enumerate(POST_FLOW_STEPS):
+            if idx == last_idx and post_text:
+                _type_caption(post_text, serial)  # best-effort, never fatal
+            if not _wait_and_tap(labels, serial):
+                # A screen we didn't recognize — force-stop TikTok rather than leaving
+                # the composer open; the message stays spooled for --retry.
+                _force_stop(pkg, serial)
+                return "needs_manual"
 
-    # Posted successfully — wait for the upload to finish, then close TikTok so
-    # it isn't left running.
-    time.sleep(POST_SUCCESS_KILL_DELAY)
-    _force_stop(pkg, serial)
-    return "posted"
+        # Posted successfully — wait for the upload to finish, then close TikTok so
+        # it isn't left running.
+        time.sleep(POST_SUCCESS_KILL_DELAY)
+        _force_stop(pkg, serial)
+        return "posted"
 
 
 def caption_from_imagekit(image_path: str, *, folder: str = "/tiktok") -> tuple[Optional[str], Optional[str]]:

@@ -81,7 +81,7 @@ The seven console-script entry points (`agent.py`, `imagekit_source.py`,
 **top level**. The shared, non-CLI library modules live in the **`core/`** package:
 `core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
 `core/adb_pusher.py`, `core/comment_source.py`, `core/comment_read_source.py`,
-`core/local_store.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
+`core/local_store.py`, `core/device_lock.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
 modules inside `core/` import siblings with relative imports (`from .x import …`)
 and may still reach back to top-level modules (e.g. `core/imagekit_agent.py`
 imports the top-level `imagekit_source`/`tiktok_poster`).
@@ -172,6 +172,30 @@ the list back so the backend can generate replies (sent to `tiktok-commenter` wi
 it, and the poster/commenter/profile flows build on `tiktok_ui` rather than calling
 `run_adb` directly (except for a few feature-specific intents/keyevents). Touch
 device interaction in `tiktok_ui.py` / `adb_pusher.py`.
+
+### One device, one flow at a time (`core/device_lock.py`)
+
+The three consumers (`tiktok-agent`, `tiktok-commenter`, `tiktok-comment-reader`)
+run as **separate OS processes** but drive the **one** attached phone — and
+uiautomator **cannot run in parallel** on a single device (two overlapping
+`uiautomator dump`/tap flows give stale UI trees, dropped taps, and spurious
+`needs_manual`). Each process already handles its own messages one-at-a-time (a
+single worker thread), but nothing in-process can coordinate across the three.
+
+`core/device_lock.py::device_lock(serial)` is a cross-process **`fcntl.flock`**
+(exclusive) held for the **whole device flow**. The three device-flow entrypoints —
+`tiktok_poster.post`, `tiktok_commenter.comment_on_post`, `tiktok_commenter.read_comments`
+— wrap their entire body in `with device_lock(serial):`, so every run mode
+(`--watch`/`--once`/`--retry`/direct-run; `--catch-up` never touches the device) is
+covered and the lock spans `ensure_account` + the post-success force-stop delays.
+**Running all three watchers together is therefore safe.** When the device is busy a
+consumer **blocks (waits its turn)** rather than dropping work — it logs `[device]
+busy — waiting for the phone…` and proceeds once the holder finishes. The lock is
+keyed by `serial` (one lock file per device; default → a single shared lock under
+`$TMPDIR`, override the dir with `$TIKTOK_DEVICE_LOCK_DIR`) and is released
+automatically by the OS if the holding process dies, so a crash can't wedge the
+device. **Don't nest** these three flows within one process — a single `flock` per
+flow would self-deadlock.
 
 **Shared vs. feature-specific.** Two modules hold the reusable machinery the four
 feature modules used to duplicate: `tiktok_ui.py` (adb/UI primitives) and

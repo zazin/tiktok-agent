@@ -37,6 +37,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 from core.adb_pusher import run_adb, PhonePushError
+from core.device_lock import device_lock
 from tiktok_profile import ensure_account, TikTokProfileError
 from core.tiktok_ui import (
     TIKTOK_PACKAGES,
@@ -361,21 +362,24 @@ def read_comments(
     Raises:
         TikTokCommentError: If opening the post itself fails (no TikTok).
     """
-    pkg = open_post(url, serial=serial, package=package)
+    # Serialize the whole flow against the single device — only one consumer
+    # process may drive the phone at a time (see core/device_lock.py).
+    with device_lock(serial):
+        pkg = open_post(url, serial=serial, package=package)
 
-    # Pause the looping video so the sheet is dumpable (see _pause_video).
-    if not _pause_video(serial):
+        # Pause the looping video so the sheet is dumpable (see _pause_video).
+        if not _pause_video(serial):
+            _force_stop(pkg, serial)
+            return "needs_manual", []
+
+        # Open the comment sheet (icon's content-desc embeds a count → substring match).
+        if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
+            _force_stop(pkg, serial)
+            return "needs_manual", []
+
+        comments = collect_comments(serial, max_comments=max_comments)
         _force_stop(pkg, serial)
-        return "needs_manual", []
-
-    # Open the comment sheet (icon's content-desc embeds a count → substring match).
-    if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
-        _force_stop(pkg, serial)
-        return "needs_manual", []
-
-    comments = collect_comments(serial, max_comments=max_comments)
-    _force_stop(pkg, serial)
-    return "read", comments
+        return "read", comments
 
 
 def comment_on_post(
@@ -417,79 +421,82 @@ def comment_on_post(
     Raises:
         TikTokCommentError: If opening the post itself fails (no TikTok).
     """
-    if account:
-        try:
-            ensure_account(account, serial=serial, package=package)
-        except TikTokProfileError as e:
-            print(f"  wrong account: {e}", flush=True)
-            _force_stop(package, serial)  # don't leave TikTok open on an error
-            return "wrong_account"
+    # Serialize the whole flow against the single device — only one consumer
+    # process may drive the phone at a time (see core/device_lock.py).
+    with device_lock(serial):
+        if account:
+            try:
+                ensure_account(account, serial=serial, package=package)
+            except TikTokProfileError as e:
+                print(f"  wrong account: {e}", flush=True)
+                _force_stop(package, serial)  # don't leave TikTok open on an error
+                return "wrong_account"
 
-    pkg = open_post(url, serial=serial, package=package)
+        pkg = open_post(url, serial=serial, package=package)
 
-    # TikTok loops the video, keeping the UI non-idle so `uiautomator dump` fails
-    # and returns a stale tree — pause it first so every dump below is real.
-    if not _pause_video(serial):
-        _force_stop(pkg, serial)
-        return "needs_manual"
-
-    # Open the comment sheet (icon's content-desc embeds a count → substring match).
-    if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
-        _force_stop(pkg, serial)
-        return "needs_manual"
-
-    # Locate the comment input field and capture its bounds BEFORE focusing it:
-    # once focused, the blinking cursor keeps the UI non-idle (dump fails), so we
-    # derive the send-button position from this geometry instead of re-dumping. The
-    # field sits at the bottom of the sheet with the keyboard down; hiding the keyboard
-    # later returns it here, so this captured Y is the send-button row in both modes.
-    input_bounds = _wait_for_bounds(COMMENT_INPUT_HINTS, serial)
-    if not input_bounds:
-        _force_stop(pkg, serial)
-        return "needs_manual"
-    ix1, iy1, ix2, iy2 = input_bounds
-    input_cx, input_cy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
-
-    if reply_to:
-        # Reply mode: find the target comment row and tap its Reply button, which
-        # auto-focuses the input ("Membalas <author>"); no separate input tap needed.
-        if not _find_and_tap_reply(serial, reply_to.get("author", ""), reply_to.get("text")):
-            print(f"  reply target not found: {reply_to}", flush=True)
+        # TikTok loops the video, keeping the UI non-idle so `uiautomator dump` fails
+        # and returns a stale tree — pause it first so every dump below is real.
+        if not _pause_video(serial):
             _force_stop(pkg, serial)
-            return "comment_not_found"
-    else:
-        # Top-level comment: focus the bottom input field directly.
-        _tap(serial, input_cx, input_cy)
+            return "needs_manual"
+
+        # Open the comment sheet (icon's content-desc embeds a count → substring match).
+        if not _wait_and_tap_partial(COMMENT_OPEN_SUBSTRINGS, serial):
+            _force_stop(pkg, serial)
+            return "needs_manual"
+
+        # Locate the comment input field and capture its bounds BEFORE focusing it:
+        # once focused, the blinking cursor keeps the UI non-idle (dump fails), so we
+        # derive the send-button position from this geometry instead of re-dumping. The
+        # field sits at the bottom of the sheet with the keyboard down; hiding the keyboard
+        # later returns it here, so this captured Y is the send-button row in both modes.
+        input_bounds = _wait_for_bounds(COMMENT_INPUT_HINTS, serial)
+        if not input_bounds:
+            _force_stop(pkg, serial)
+            return "needs_manual"
+        ix1, iy1, ix2, iy2 = input_bounds
+        input_cx, input_cy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
+
+        if reply_to:
+            # Reply mode: find the target comment row and tap its Reply button, which
+            # auto-focuses the input ("Membalas <author>"); no separate input tap needed.
+            if not _find_and_tap_reply(serial, reply_to.get("author", ""), reply_to.get("text")):
+                print(f"  reply target not found: {reply_to}", flush=True)
+                _force_stop(pkg, serial)
+                return "comment_not_found"
+        else:
+            # Top-level comment: focus the bottom input field directly.
+            _tap(serial, input_cx, input_cy)
+            time.sleep(1.0)
+
+        typeable = _ascii_for_input(text)
+        if not typeable:
+            # adb input can't type this (e.g. all emoji/non-Latin); don't submit blank.
+            _force_stop(pkg, serial)
+            return "skipped_non_ascii"
+
+        if dry_run:
+            print(f"  [dry-run] would comment {typeable!r} on {url}", flush=True)
+            return "dry_run"
+
+        _input_line(text, serial)
+        time.sleep(0.5)
+
+        # Hide the keyboard (so the send button drops back to the input row), then tap
+        # send positionally — it sits at the right end of that row. We can't dump here
+        # (the focused field blocks it), so this tap is geometric, anchored to the
+        # input field's vertical center.
+        run_adb(["shell", "input", "keyevent", "4"], serial=serial)  # BACK → hide IME
         time.sleep(1.0)
+        width, _ = _screen_size(serial)
+        _tap(serial, int(width * SEND_BTN_X_FRAC), input_cy)
+        time.sleep(STEP_DELAY)
 
-    typeable = _ascii_for_input(text)
-    if not typeable:
-        # adb input can't type this (e.g. all emoji/non-Latin); don't submit blank.
+        # Commented — wait for the submit to land, then close TikTok so it isn't left
+        # running (mirrors the poster's post-success force-stop).
+        time.sleep(COMMENT_SUCCESS_KILL_DELAY)
         _force_stop(pkg, serial)
-        return "skipped_non_ascii"
-
-    if dry_run:
-        print(f"  [dry-run] would comment {typeable!r} on {url}", flush=True)
-        return "dry_run"
-
-    _input_line(text, serial)
-    time.sleep(0.5)
-
-    # Hide the keyboard (so the send button drops back to the input row), then tap
-    # send positionally — it sits at the right end of that row. We can't dump here
-    # (the focused field blocks it), so this tap is geometric, anchored to the
-    # input field's vertical center.
-    run_adb(["shell", "input", "keyevent", "4"], serial=serial)  # BACK → hide IME
-    time.sleep(1.0)
-    width, _ = _screen_size(serial)
-    _tap(serial, int(width * SEND_BTN_X_FRAC), input_cy)
-    time.sleep(STEP_DELAY)
-
-    # Commented — wait for the submit to land, then close TikTok so it isn't left
-    # running (mirrors the poster's post-success force-stop).
-    time.sleep(COMMENT_SUCCESS_KILL_DELAY)
-    _force_stop(pkg, serial)
-    return "commented"
+        return "commented"
 
 
 def _cli() -> int:
