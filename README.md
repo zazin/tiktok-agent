@@ -33,17 +33,25 @@ The pipeline publishes one **QoS-1, retained-false** JSON message per post to th
 
 ## Files
 
+The CLI entry points live at the top level; the shared, non-CLI library modules
+live in the `core/` package.
+
 | File | Purpose |
 |------|---------|
 | `agent.py` | Orchestrator — poll → download → push → auto-post → report status (`--source`, `--catch-up`) |
 | `hivemq_source.py` | Drain the work topic + publish/ack outcomes over MQTT (paho, also the `tiktok-hivemq` CLI) |
 | `imagekit_source.py` | `download()` images (used by both sources) + list the ImageKit folder (legacy queue) |
-| `adb_pusher.py` | Push an image to the phone gallery over adb (+ media scan) |
 | `tiktok_poster.py` | Best-effort auto-post via adb UI automation (also the `tiktok-post` CLI) |
+| `tiktok_profile.py` | Read/switch the active TikTok account before acting (also the `tiktok-profile` CLI) |
 | `comment_agent.py` | Comment-on-post orchestrator + `tiktok-commenter` CLI (independent of posting) |
-| `comment_source.py` | Drain the comment topic + publish/ack comment outcomes over MQTT (mirror of `hivemq_source.py`) |
 | `tiktok_commenter.py` | adb UI automation to open a post by URL and submit a comment |
-| `env_loader.py` | Zero-dependency `.env` loader |
+| `core/mqtt_queue.py` | **Shared** durable MQTT work-queue (`MqttWorkQueue`); backs both `hivemq_source` and `comment_source` |
+| `core/comment_source.py` | Thin comment-topic wiring over `MqttWorkQueue` (own topic/client-id/status) |
+| `core/tiktok_ui.py` | **Shared** low-level adb/UI primitives (dump, find, tap, type, force-stop) for poster/commenter/profile |
+| `core/adb_pusher.py` | `run_adb()` + push an image to the phone gallery over adb (+ media scan) |
+| `core/imagekit_agent.py` | Legacy `--source imagekit` orchestration (split out of `agent.py`) |
+| `core/local_store.py` | One-JSON-per-message spool dir shared by both consumers (for `--retry`) |
+| `core/env_loader.py` | Zero-dependency `.env` loader |
 | `agent_state.json` | Local record of processed `fileId`s — **`--source imagekit` only**, gitignored |
 
 ## Quick Start

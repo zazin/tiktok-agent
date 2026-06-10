@@ -62,7 +62,7 @@ def _post_record(fields: dict, *, serial: Optional[str], auto_post: bool, dest_d
     caller decides how to report/park them. Shared by the drain, watch, and retry paths.
     """
     from imagekit_source import download
-    from adb_pusher import push_to_phone
+    from core.adb_pusher import push_to_phone
     from tiktok_poster import post
 
     rec_id = fields.get("id")
@@ -100,7 +100,7 @@ def process_once(
         return _process_hivemq(
             serial=serial, auto_post=auto_post, dest_dir=dest_dir, store_path=store_path
         )
-    from imagekit_agent import process_imagekit
+    from core.imagekit_agent import process_imagekit
     return process_imagekit(
         folder=folder, state_path=state_path, serial=serial, auto_post=auto_post, dest_dir=dest_dir
     )
@@ -119,10 +119,10 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, st
     is deleted only on a successful post; a non-"posted" outcome or an error leaves it
     on disk (status recorded) to be re-attempted later with --retry.
     """
-    import local_store
+    from core import local_store
     from hivemq_source import list_pending, update_status, close, HiveMQSourceError
     from imagekit_source import ImageKitSourceError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
     from tiktok_poster import TikTokPostError
 
     try:
@@ -191,10 +191,10 @@ def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, stor
     As in the drain path, every message is mirrored to its own JSON file on receive;
     the file is deleted on a successful post and kept otherwise for --retry.
     """
-    import local_store
+    from core import local_store
     from hivemq_source import watch, HiveMQSourceError
     from imagekit_source import ImageKitSourceError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
     from tiktok_poster import TikTokPostError
 
     def handler(rec: dict) -> Optional[str]:
@@ -266,9 +266,9 @@ def _retry_posts(*, serial: Optional[str], auto_post: bool, dest_dir: str, store
     surviving file. On "posted" the file is deleted; otherwise it stays (its status and
     attempts count are updated). Returns the number that succeeded.
     """
-    import local_store
+    from core import local_store
     from imagekit_source import ImageKitSourceError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
     from tiktok_poster import TikTokPostError
 
     entries = local_store.items(store_path)
@@ -313,12 +313,12 @@ def catch_up(*, source: str, folder: str, state_path: Path) -> int:
     if source == "hivemq":
         return _catch_up_hivemq()
 
-    from imagekit_agent import catch_up_imagekit
+    from core.imagekit_agent import catch_up_imagekit
     return catch_up_imagekit(folder=folder, state_path=state_path)
 
 
 def _cli() -> int:
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(

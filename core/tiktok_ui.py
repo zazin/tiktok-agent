@@ -23,7 +23,7 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Optional
 
-from adb_pusher import run_adb, PhonePushError
+from .adb_pusher import run_adb, PhonePushError
 
 
 # TikTok package names: global app, then the older/alt package as fallback.

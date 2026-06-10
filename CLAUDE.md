@@ -59,7 +59,21 @@ uv run tiktok-commenter --retry                    # re-attempt comments still i
 
 There are **no tests, linter, or build step** configured. The wheel `include`
 list in `pyproject.toml` must be updated by hand if a new top-level `.py` module
-is added.
+is added (the shared library package is bundled wholesale via `core/*.py`, so new
+modules **inside `core/`** are picked up automatically).
+
+### Layout: top-level CLIs + `core/` package
+
+The six console-script entry points (`agent.py`, `imagekit_source.py`,
+`hivemq_source.py`, `tiktok_poster.py`, `comment_agent.py`, `tiktok_profile.py`)
+and `tiktok_commenter.py` (a direct-run helper) live at the **top level**. The
+shared, non-CLI library modules live in the **`core/`** package:
+`core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
+`core/adb_pusher.py`, `core/comment_source.py`, `core/local_store.py`,
+`core/env_loader.py`. Top-level modules import them as `from core.x import …`;
+modules inside `core/` import siblings with relative imports (`from .x import …`)
+and may still reach back to top-level modules (e.g. `core/imagekit_agent.py`
+imports the top-level `imagekit_source`/`tiktok_poster`).
 
 ### Credentials
 
@@ -111,16 +125,16 @@ sequence. Each module is a single-responsibility seam with its own error type:
 | Module | Role | Error type |
 |--------|------|-----------|
 | `agent.py` | Orchestrator (HiveMQ path + dispatch + CLI): receive/drain → download → push → (auto-post) → report status. `--watch` calls `_watch_hivemq` (event-driven); `--once`/`process_once` dispatch `_process_hivemq` (drain) or delegate to `imagekit_agent` on `--source imagekit` | — |
-| `imagekit_agent.py` | Legacy `--source imagekit` orchestration (`process_imagekit`/`catch_up_imagekit`), split out of `agent.py`: dedups the ImageKit folder against the local `agent_state.json` | — |
+| `core/imagekit_agent.py` | Legacy `--source imagekit` orchestration (`process_imagekit`/`catch_up_imagekit`), split out of `agent.py`: dedups the ImageKit folder against the local `agent_state.json` | — |
 | `hivemq_source.py` | Thin wiring for the **post** queue: post-specific config + `_parse`, re-exporting an `MqttWorkQueue` instance's API (`watch`/`list_pending`/`update_status`/`close`) as module functions | `HiveMQSourceError` (from `mqtt_queue`) |
-| `mqtt_queue.py` | **Shared** durable MQTT machinery: `MqttWorkQueue` (persistent QoS-1 session, drain, event-driven `watch`, manual-ack) + `make_config`, parameterized by a `parse`/`key_of`/topic config. Used by both consumers | `HiveMQSourceError` |
+| `core/mqtt_queue.py` | **Shared** durable MQTT machinery: `MqttWorkQueue` (persistent QoS-1 session, drain, event-driven `watch`, manual-ack) + `make_config`, parameterized by a `parse`/`key_of`/topic config. Used by both consumers | `HiveMQSourceError` |
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
-| `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
-| `tiktok_ui.py` | **Shared** low-level adb/UI primitives (`dump_ui`, `find_tappable`, `tap`, `force_stop`, `wait_and_tap`, `input_line`, `screen_size`, …) used by the poster, commenter and profile flows | (raises `PhonePushError`) |
+| `core/adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
+| `core/tiktok_ui.py` | **Shared** low-level adb/UI primitives (`dump_ui`, `find_tappable`, `tap`, `force_stop`, `wait_and_tap`, `input_line`, `screen_size`, …) used by the poster, commenter and profile flows | (raises `PhonePushError`) |
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post (post-specific flow/labels; primitives from `tiktok_ui`) | `TikTokPostError` |
 | `tiktok_profile.py` | Read the active TikTok account and switch to a target `@handle` before acting (shared by poster + commenter; primitives from `tiktok_ui`) | `TikTokProfileError` |
-| `local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
-| `env_loader.py` | Zero-dep `.env` loader | — |
+| `core/local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
+| `core/env_loader.py` | Zero-dep `.env` loader | — |
 
 The **comment-on-post** feature is a second, independent consumer (its own
 orchestrator + console script `tiktok-commenter`, its own HiveMQ topic / client-id;
@@ -129,7 +143,7 @@ no image handling, no AI):
 | Module | Role | Error type |
 |--------|------|-----------|
 | `comment_agent.py` | Orchestrator + CLI: drain the comment topic → open post by URL → submit comment → report status. `--watch` (event-driven) / `--once` / `--catch-up` | — |
-| `comment_source.py` | Thin wiring for the **comment** topic: comment-specific config + `_parse`, re-exporting its own `MqttWorkQueue` instance (own topic/client-id/status, `PostURL`+`Comment` parse) | `HiveMQSourceError` (from `mqtt_queue`) |
+| `core/comment_source.py` | Thin wiring for the **comment** topic: comment-specific config + `_parse`, re-exporting its own `MqttWorkQueue` instance (own topic/client-id/status, `PostURL`+`Comment` parse) | `HiveMQSourceError` (from `mqtt_queue`) |
 | `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment (comment-specific flow/labels; primitives from `tiktok_ui`) | `TikTokCommentError` |
 
 `run_adb()` in `adb_pusher.py` is the single chokepoint for **all** adb calls

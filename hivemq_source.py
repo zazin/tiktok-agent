@@ -43,7 +43,7 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-from mqtt_queue import HiveMQSourceError, MqttWorkQueue, make_config
+from core.mqtt_queue import HiveMQSourceError, MqttWorkQueue, make_config
 
 
 DEFAULT_TOPIC = "tiktok/posts"
@@ -123,7 +123,7 @@ def watch(handler) -> None:
 
 
 def _cli() -> int:
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(

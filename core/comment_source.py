@@ -33,7 +33,7 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-from mqtt_queue import HiveMQSourceError, MqttWorkQueue, make_config
+from .mqtt_queue import HiveMQSourceError, MqttWorkQueue, make_config
 
 
 DEFAULT_TOPIC = "tiktok/comments"

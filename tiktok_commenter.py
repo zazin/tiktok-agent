@@ -34,9 +34,9 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from adb_pusher import run_adb, PhonePushError
+from core.adb_pusher import run_adb, PhonePushError
 from tiktok_profile import ensure_account, TikTokProfileError
-from tiktok_ui import (
+from core.tiktok_ui import (
     TIKTOK_PACKAGES,
     STEP_DELAY,
     STEP_RETRIES,
@@ -264,7 +264,7 @@ def comment_on_post(
 def _cli() -> int:
     import argparse
     import sys
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(

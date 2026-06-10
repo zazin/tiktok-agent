@@ -23,18 +23,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 include = [
+    # CLI entry points (console scripts) stay at the top level
     "agent.py",
-    "imagekit_agent.py",
     "imagekit_source.py",
     "hivemq_source.py",
-    "mqtt_queue.py",
-    "adb_pusher.py",
     "tiktok_poster.py",
     "tiktok_commenter.py",
-    "tiktok_ui.py",
-    "comment_source.py",
     "comment_agent.py",
     "tiktok_profile.py",
-    "local_store.py",
-    "env_loader.py",
+    # shared, non-CLI library modules
+    "core/*.py",
 ]

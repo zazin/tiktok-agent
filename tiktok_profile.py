@@ -31,8 +31,8 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Optional
 
-from adb_pusher import run_adb, PhonePushError
-from tiktok_ui import (
+from core.adb_pusher import run_adb, PhonePushError
+from core.tiktok_ui import (
     TIKTOK_PACKAGES,
     STEP_DELAY,
     STEP_RETRIES,
@@ -256,7 +256,7 @@ def ensure_account(target: str, *, serial: Optional[str] = None, package: Option
 def _cli() -> int:
     import argparse
     import sys
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(

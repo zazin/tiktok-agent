@@ -47,7 +47,7 @@ def _log(msg: str) -> None:
 
 def _resolve(store_path: Path, post_url: str, status: str, error: Optional[str] = None) -> None:
     """After acting on a stored comment: delete its file if terminal, else record outcome."""
-    import local_store
+    from core import local_store
 
     if status in _TERMINAL:
         local_store.remove(store_path, post_url)
@@ -65,10 +65,10 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
     comment lands (or can never be typed) and kept on needs_manual/failed for --retry.
     Returns the number processed.
     """
-    import local_store
-    from comment_source import list_pending, update_status, close, HiveMQSourceError
+    from core import local_store
+    from core.comment_source import list_pending, update_status, close, HiveMQSourceError
     from tiktok_commenter import comment_on_post, TikTokCommentError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
 
     try:
         try:
@@ -118,10 +118,10 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
 
 def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, store_path: Path) -> None:
     """Event-driven watch: comment on each HiveMQ message the instant it arrives."""
-    import local_store
-    from comment_source import watch, HiveMQSourceError
+    from core import local_store
+    from core.comment_source import watch, HiveMQSourceError
     from tiktok_commenter import comment_on_post, TikTokCommentError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
 
     def handler(rec: dict) -> Optional[str]:
         post_url = rec["post_url"]
@@ -165,9 +165,9 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
     needs_manual/failed keep the file (status and attempts updated). Returns the number
     that actually commented.
     """
-    import local_store
+    from core import local_store
     from tiktok_commenter import comment_on_post, TikTokCommentError
-    from adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError
 
     entries = local_store.items(store_path)
     _log(f"Retry: {len(entries)} stored comment(s) in {store_path}")
@@ -201,7 +201,7 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
 
 def catch_up() -> int:
     """Drain the current comment backlog and mark each 'commented' without acting."""
-    from comment_source import list_pending, update_status, close, HiveMQSourceError
+    from core.comment_source import list_pending, update_status, close, HiveMQSourceError
 
     try:
         try:
@@ -225,7 +225,7 @@ def catch_up() -> int:
 
 
 def _cli() -> int:
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(

@@ -68,7 +68,7 @@ def process_imagekit(
 ) -> int:
     """Legacy poll cycle: dedup the ImageKit folder against the local state file."""
     from imagekit_source import list_images, download, ImageKitSourceError
-    from adb_pusher import push_to_phone, PhonePushError
+    from .adb_pusher import push_to_phone, PhonePushError
     from tiktok_poster import post, TikTokPostError
 
     state = _load_state(state_path)

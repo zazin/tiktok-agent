@@ -130,7 +130,7 @@ def download(url: str, dest: str | os.PathLike, *, timeout: int = 120) -> Path:
 
 
 def _cli() -> int:
-    from env_loader import load_env
+    from core.env_loader import load_env
     load_env()
 
     parser = argparse.ArgumentParser(description="List/download images from an ImageKit folder.")
