@@ -20,15 +20,23 @@ from __future__ import annotations
 
 import re
 import time
-import xml.etree.ElementTree as ET
 from typing import Optional
 
 from adb_pusher import run_adb, PhonePushError
 from tiktok_profile import ensure_account, TikTokProfileError
+from tiktok_ui import (
+    TIKTOK_PACKAGES,
+    STEP_DELAY,
+    STEP_RETRIES,
+    installed_package as _installed_package,
+    dump_ui as _dump_ui,
+    find_tappable as _find_tappable,
+    tap as _tap,
+    force_stop as _force_stop,
+    wait_and_tap as _wait_and_tap,
+    input_line as _input_line,
+)
 
-
-# TikTok package names: global app, then the older/alt package as fallback.
-TIKTOK_PACKAGES = ("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
 # The post flow is an ORDERED sequence of screen-advances. Each entry lists the
 # equivalent button labels (English + Indonesian) for one screen. We advance
@@ -49,30 +57,14 @@ CAPTION_HINTS = (
     "Tell viewers about your post",
 )
 
-# Per-step pacing: how long to wait for a screen, and retries while it loads.
-STEP_DELAY = 2.5
-STEP_RETRIES = 6
-
 # After a successful post, wait this long (so the upload finishes) before
-# force-stopping TikTok.
+# force-stopping TikTok. (Per-step pacing STEP_DELAY/STEP_RETRIES and the
+# low-level UI primitives are shared via tiktok_ui.)
 POST_SUCCESS_KILL_DELAY = 8.0
 
 
 class TikTokPostError(Exception):
     """Raised when the auto-post flow fails."""
-
-
-def _installed_package(serial: Optional[str]) -> Optional[str]:
-    """Return the first TikTok package actually installed on the device."""
-    try:
-        out = run_adb(["shell", "pm", "list", "packages"], serial=serial)
-    except PhonePushError:
-        return None
-    installed = {line.replace("package:", "").strip() for line in out.splitlines()}
-    for pkg in TIKTOK_PACKAGES:
-        if pkg in installed:
-            return pkg
-    return None
 
 
 def _resolve_content_uri(remote_path: str, serial: Optional[str]) -> Optional[str]:
@@ -141,84 +133,6 @@ def open_in_tiktok(
         serial=serial,
     )
     return pkg
-
-
-def _dump_ui(serial: Optional[str]) -> str:
-    """Dump the current UI hierarchy XML and return it as text."""
-    run_adb(["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], serial=serial)
-    return run_adb(["shell", "cat", "/sdcard/window_dump.xml"], serial=serial)
-
-
-def _center_of_bounds(bounds: str) -> Optional[tuple[int, int]]:
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if not m:
-        return None
-    x1, y1, x2, y2 = (int(v) for v in m.groups())
-    return (x1 + x2) // 2, (y1 + y2) // 2
-
-
-def _find_tappable(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int]]:
-    """Find the center of the first node whose text/content-desc matches a label."""
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
-        return None
-    wanted = {l.lower() for l in labels}
-    for node in root.iter("node"):
-        text = (node.get("text") or "").strip().lower()
-        desc = (node.get("content-desc") or "").strip().lower()
-        if text in wanted or desc in wanted:
-            center = _center_of_bounds(node.get("bounds", ""))
-            if center:
-                return center
-    return None
-
-
-def _tap(serial: Optional[str], x: int, y: int) -> None:
-    run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
-
-
-def _force_stop(package: Optional[str], serial: Optional[str]) -> None:
-    """Force-stop TikTok (best-effort; never fatal).
-
-    If `package` is None (e.g. an error before we resolved which package opened),
-    stop every known TikTok package — force-stopping a non-running one is a no-op.
-    """
-    targets = [package] if package else list(TIKTOK_PACKAGES)
-    for pkg in targets:
-        try:
-            run_adb(["shell", "am", "force-stop", pkg], serial=serial)
-        except PhonePushError:
-            pass
-
-
-def _wait_and_tap(
-    labels: tuple[str, ...],
-    serial: Optional[str],
-    *,
-    retries: int = STEP_RETRIES,
-    delay: float = STEP_DELAY,
-) -> bool:
-    """Poll the UI until a node matching `labels` appears, then tap it. True if tapped."""
-    for _ in range(retries):
-        target = _find_tappable(_dump_ui(serial), labels)
-        if target:
-            _tap(serial, *target)
-            time.sleep(delay)
-            return True
-        time.sleep(delay)
-    return False
-
-
-def _input_line(line: str, serial: Optional[str]) -> None:
-    """Type one line into the focused field via `adb input text`."""
-    # `adb input text` can't type emoji/non-ASCII — strip those (the full text
-    # still lives in ImageKit metadata). Quotes confuse the shell; spaces -> %s.
-    ascii_only = line.encode("ascii", "ignore").decode()
-    ascii_only = re.sub(r"[\"'`]", "", ascii_only)
-    safe = re.sub(r"[ \t]+", " ", ascii_only).strip().replace(" ", "%s")
-    if safe:
-        run_adb(["shell", "input", "text", safe], serial=serial)
 
 
 def _type_caption(text: str, serial: Optional[str]) -> bool:

@@ -16,8 +16,8 @@ still need attention (one JSON per item). Re-attempt them later with ``--retry``
 which iterates the surviving files.
 
 It is deliberately generic (a keyed spool, no domain knowledge) so both the poster
-(``agent.py``) and the commenter (``comment_agent.py``) share it — unlike the
-brittle UI/MQTT plumbing those two duplicate on purpose.
+(``agent.py``) and the commenter (``comment_agent.py``) share it — like the adb/UI
+primitives (``tiktok_ui.py``) and the MQTT work-queue (``mqtt_queue.py``).
 
 Each file holds::
 

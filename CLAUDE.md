@@ -112,11 +112,13 @@ sequence. Each module is a single-responsibility seam with its own error type:
 |--------|------|-----------|
 | `agent.py` | Orchestrator (HiveMQ path + dispatch + CLI): receive/drain → download → push → (auto-post) → report status. `--watch` calls `_watch_hivemq` (event-driven); `--once`/`process_once` dispatch `_process_hivemq` (drain) or delegate to `imagekit_agent` on `--source imagekit` | — |
 | `imagekit_agent.py` | Legacy `--source imagekit` orchestration (`process_imagekit`/`catch_up_imagekit`), split out of `agent.py`: dedups the ImageKit folder against the local `agent_state.json` | — |
-| `hivemq_source.py` | `watch(handler)` (persistent push subscription) + `list_pending()`/`update_status()`/`close()` (one-shot drain), over MQTT (paho, persistent QoS-1 session) | `HiveMQSourceError` |
+| `hivemq_source.py` | Thin wiring for the **post** queue: post-specific config + `_parse`, re-exporting an `MqttWorkQueue` instance's API (`watch`/`list_pending`/`update_status`/`close`) as module functions | `HiveMQSourceError` (from `mqtt_queue`) |
+| `mqtt_queue.py` | **Shared** durable MQTT machinery: `MqttWorkQueue` (persistent QoS-1 session, drain, event-driven `watch`, manual-ack) + `make_config`, parameterized by a `parse`/`key_of`/topic config. Used by both consumers | `HiveMQSourceError` |
 | `imagekit_source.py` | `download()` (used by both sources) + list from ImageKit Media Management API | `ImageKitSourceError` |
 | `adb_pusher.py` | `run_adb()` wrapper + push file to gallery + media scan | `PhonePushError` |
-| `tiktok_poster.py` | Drive TikTok's UI over adb to post | `TikTokPostError` |
-| `tiktok_profile.py` | Read the active TikTok account and switch to a target `@handle` before acting (shared by poster + commenter) | `TikTokProfileError` |
+| `tiktok_ui.py` | **Shared** low-level adb/UI primitives (`dump_ui`, `find_tappable`, `tap`, `force_stop`, `wait_and_tap`, `input_line`, `screen_size`, …) used by the poster, commenter and profile flows | (raises `PhonePushError`) |
+| `tiktok_poster.py` | Drive TikTok's UI over adb to post (post-specific flow/labels; primitives from `tiktok_ui`) | `TikTokPostError` |
+| `tiktok_profile.py` | Read the active TikTok account and switch to a target `@handle` before acting (shared by poster + commenter; primitives from `tiktok_ui`) | `TikTokProfileError` |
 | `local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
 | `env_loader.py` | Zero-dep `.env` loader | — |
 
@@ -127,13 +129,23 @@ no image handling, no AI):
 | Module | Role | Error type |
 |--------|------|-----------|
 | `comment_agent.py` | Orchestrator + CLI: drain the comment topic → open post by URL → submit comment → report status. `--watch` (event-driven) / `--once` / `--catch-up` | — |
-| `comment_source.py` | Self-contained mirror of `hivemq_source.py` for the comment topic (own topic/client-id/status, `PostURL`+`Comment` parse, persistent QoS-1 session) | `HiveMQSourceError` (reused) |
-| `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment | `TikTokCommentError` |
+| `comment_source.py` | Thin wiring for the **comment** topic: comment-specific config + `_parse`, re-exporting its own `MqttWorkQueue` instance (own topic/client-id/status, `PostURL`+`Comment` parse) | `HiveMQSourceError` (from `mqtt_queue`) |
+| `tiktok_commenter.py` | Drive TikTok's UI over adb: deep-link open a post → open comment sheet → type + submit one comment (comment-specific flow/labels; primitives from `tiktok_ui`) | `TikTokCommentError` |
 
 `run_adb()` in `adb_pusher.py` is the single chokepoint for **all** adb calls
-(push, shell, intents, UI dumps, taps) — `tiktok_poster.py` and
-`tiktok_commenter.py` import it rather than shelling out themselves. Touch device
-interaction there.
+(push, shell, intents, UI dumps, taps). The shared `tiktok_ui.py` primitives import
+it, and the poster/commenter/profile flows build on `tiktok_ui` rather than calling
+`run_adb` directly (except for a few feature-specific intents/keyevents). Touch
+device interaction in `tiktok_ui.py` / `adb_pusher.py`.
+
+**Shared vs. feature-specific.** Two modules hold the reusable machinery the four
+feature modules used to duplicate: `tiktok_ui.py` (adb/UI primitives) and
+`mqtt_queue.py` (durable MQTT work-queue). `hivemq_source.py` and
+`comment_source.py` are now thin: each builds an `MqttWorkQueue` with its own
+config/parse and re-exports `list_pending`/`update_status`/`close`/`watch`. The
+poster/commenter/profile keep only their own screen labels and flow logic and
+import the primitives from `tiktok_ui`. When TikTok's UI or the queue semantics
+change, fix it once in the shared module.
 
 ### State machine (dedup)
 
@@ -269,10 +281,10 @@ facts drove the implementation, encoded in the constants/helpers at the top of
   without `@`** (e.g. `captgani`), matched normalized by `_find_account_row`.
 
 Use `uv run tiktok-profile` (no arg = print the current `@handle`; `tiktok-profile
-@target` = switch) to re-calibrate in isolation. The low-level UI helpers are
-**copied** from `tiktok_poster.py`, following the per-feature-duplication pattern;
-unlike them this one module is **shared** by both consumers (the account check is
-identical). It fails *safe*: an unconfirmed account never posts to the wrong one.
+@target` = switch) to re-calibrate in isolation. The low-level UI helpers come from
+the shared `tiktok_ui.py`; this module adds only the profile-header / account-switcher
+selectors and is itself **shared** by both consumers (the account check is identical).
+It fails *safe*: an unconfirmed account never posts to the wrong one.
 
 ### Comment-on-post (`tiktok-commenter`, the other brittle part)
 
@@ -330,13 +342,14 @@ AI — the exact comment text is in the message.
 - **Same brittleness + defensiveness as the poster:** the UI labels live in the
   constants block at the top of `tiktok_commenter.py` (`COMMENT_OPEN_SUBSTRINGS`,
   `COMMENT_INPUT_HINTS`, `PAUSE_TAP_X_FRAC`/`PAUSE_TAP_Y_FRAC`, `SEND_BTN_X_FRAC`,
-  `STEP_DELAY`, `STEP_RETRIES`, `COMMENT_SUCCESS_KILL_DELAY`) — **guesses that must
-  be calibrated on-device against a real `uiautomator dump`.** (The send button has
-  **no** label constant — see the positional-tap calibration fact above.)
-  The low-level UI helpers (`_dump_ui`, `_find_tappable`, `_input_line`, …) are
-  intentionally **copied** from `tiktok_poster.py` (no shared util module), and
-  `comment_source.py` likewise duplicates `hivemq_source.py`'s MQTT plumbing so the
-  working poster consumer stays untouched.
+  `COMMENT_SUCCESS_KILL_DELAY`; `STEP_DELAY`/`STEP_RETRIES` are imported from
+  `tiktok_ui`) — **guesses that must be calibrated on-device against a real
+  `uiautomator dump`.** (The send button has **no** label constant — see the
+  positional-tap calibration fact above.)
+  The low-level UI helpers (`dump_ui`, `find_tappable`, `input_line`, …) come from the
+  shared `tiktok_ui.py`, and the MQTT plumbing from the shared `mqtt_queue.py`;
+  `tiktok_commenter.py`/`comment_source.py` carry only the comment-specific labels,
+  flow and config.
 - **ASCII limit (same as captions):** `adb input text` can't type non-ASCII/emoji;
   a comment with nothing typeable after stripping is **not** submitted
   (`skipped_non_ascii`). Realistic scope is Latin-script languages.

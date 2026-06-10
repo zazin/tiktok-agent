@@ -24,24 +24,32 @@ defensive: on any screen it doesn't recognize it STOPS and returns
 
 The phone must be unlocked and TikTok installed + logged in.
 
-The low-level UI helpers (`_dump_ui`, `_find_tappable`, `_input_line`, …) are
-intentionally COPIED from tiktok_poster.py — the project has no shared adb-UI util
-module, so each feature carries its own primitives.
+The low-level UI helpers (`dump_ui`, `find_tappable`, `input_line`, …) live in the
+shared `tiktok_ui` module (used by the poster, commenter and profile flows). Only
+the comment-specific screen labels and flow (e.g. `_pause_video`) live here.
 """
 
 from __future__ import annotations
 
-import re
 import time
-import xml.etree.ElementTree as ET
 from typing import Optional
 
 from adb_pusher import run_adb, PhonePushError
 from tiktok_profile import ensure_account, TikTokProfileError
+from tiktok_ui import (
+    TIKTOK_PACKAGES,
+    STEP_DELAY,
+    STEP_RETRIES,
+    installed_package as _installed_package,
+    tap as _tap,
+    force_stop as _force_stop,
+    screen_size as _screen_size,
+    wait_and_tap_partial as _wait_and_tap_partial,
+    wait_for_bounds as _wait_for_bounds,
+    ascii_for_input as _ascii_for_input,
+    input_line as _input_line,
+)
 
-
-# TikTok package names: global app, then the older/alt package as fallback.
-TIKTOK_PACKAGES = ("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
 # ---- UI selectors — GUESSES that must be calibrated on-device ----------------
 # Open these screens with a real `uiautomator dump` and fill in the actual
@@ -72,9 +80,8 @@ COMMENT_INPUT_HINTS = (
 # It is instead tapped POSITIONALLY at the right end of the input row (see
 # comment_on_post / SEND_BTN_X_FRAC below).
 
-# Per-step pacing: how long to wait for a screen, and retries while it loads.
-STEP_DELAY = 2.5
-STEP_RETRIES = 6
+# (Per-step pacing STEP_DELAY/STEP_RETRIES and the low-level UI primitives are
+# shared via tiktok_ui.)
 
 # Geometry knobs (fractions of screen size) for the two taps that can't be
 # resolved by `uiautomator dump` (a playing video / focused input keeps the UI
@@ -97,107 +104,7 @@ class TikTokCommentError(Exception):
     """Raised when commenting on a post fails irrecoverably (e.g. no TikTok)."""
 
 
-# ---- low-level primitives (copied from tiktok_poster.py) ---------------------
-
-def _installed_package(serial: Optional[str]) -> Optional[str]:
-    """Return the first TikTok package actually installed on the device."""
-    try:
-        out = run_adb(["shell", "pm", "list", "packages"], serial=serial)
-    except PhonePushError:
-        return None
-    installed = {line.replace("package:", "").strip() for line in out.splitlines()}
-    for pkg in TIKTOK_PACKAGES:
-        if pkg in installed:
-            return pkg
-    return None
-
-
-def _dump_ui(serial: Optional[str]) -> str:
-    """Dump the current UI hierarchy XML and return it as text."""
-    run_adb(["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], serial=serial)
-    return run_adb(["shell", "cat", "/sdcard/window_dump.xml"], serial=serial)
-
-
-def _center_of_bounds(bounds: str) -> Optional[tuple[int, int]]:
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if not m:
-        return None
-    x1, y1, x2, y2 = (int(v) for v in m.groups())
-    return (x1 + x2) // 2, (y1 + y2) // 2
-
-
-def _find_tappable(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int]]:
-    """Find the center of the first node whose text/content-desc EXACTLY matches a label."""
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
-        return None
-    wanted = {l.lower() for l in labels}
-    for node in root.iter("node"):
-        text = (node.get("text") or "").strip().lower()
-        desc = (node.get("content-desc") or "").strip().lower()
-        if text in wanted or desc in wanted:
-            center = _center_of_bounds(node.get("bounds", ""))
-            if center:
-                return center
-    return None
-
-
-def _find_partial(xml: str, substrings: tuple[str, ...]) -> Optional[tuple[int, int]]:
-    """Find the center of the first node whose text/content-desc CONTAINS a substring.
-
-    Used for controls whose label embeds dynamic content (e.g. the comment icon's
-    content-desc carries the comment count), where an exact match won't hit.
-    """
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
-        return None
-    wanted = [s.lower() for s in substrings]
-    for node in root.iter("node"):
-        text = (node.get("text") or "").strip().lower()
-        desc = (node.get("content-desc") or "").strip().lower()
-        haystack = f"{text}\x00{desc}"
-        if any(s in haystack for s in wanted):
-            center = _center_of_bounds(node.get("bounds", ""))
-            if center:
-                return center
-    return None
-
-
-def _bounds_of(bounds: str) -> Optional[tuple[int, int, int, int]]:
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if not m:
-        return None
-    return tuple(int(v) for v in m.groups())  # type: ignore[return-value]
-
-
-def _tap(serial: Optional[str], x: int, y: int) -> None:
-    run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
-
-
-def _force_stop(package: Optional[str], serial: Optional[str]) -> None:
-    """Force-stop TikTok (best-effort; never fatal).
-
-    If `package` is None (e.g. an error before we resolved which package opened),
-    stop every known TikTok package — force-stopping a non-running one is a no-op.
-    """
-    targets = [package] if package else list(TIKTOK_PACKAGES)
-    for pkg in targets:
-        try:
-            run_adb(["shell", "am", "force-stop", pkg], serial=serial)
-        except PhonePushError:
-            pass
-
-
-def _screen_size(serial: Optional[str]) -> tuple[int, int]:
-    """Return the device (width, height) in pixels from `wm size`."""
-    out = run_adb(["shell", "wm", "size"], serial=serial)
-    m = re.search(r"(\d+)x(\d+)", out)
-    if not m:
-        raise TikTokCommentError(f"could not parse screen size from: {out!r}")
-    return int(m.group(1)), int(m.group(2))
-
+# ---- comment-specific UI helpers (generic primitives live in tiktok_ui) ------
 
 def _pause_video(serial: Optional[str]) -> bool:
     """
@@ -227,96 +134,6 @@ def _pause_video(serial: Optional[str]) -> bool:
             return True
         time.sleep(1.0)
     return False
-
-
-def _find_bounds(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int, int, int]]:
-    """Return the (x1,y1,x2,y2) bounds of the first node whose text/desc matches a label."""
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
-        return None
-    wanted = {l.lower() for l in labels}
-    for node in root.iter("node"):
-        text = (node.get("text") or "").strip().lower()
-        desc = (node.get("content-desc") or "").strip().lower()
-        if text in wanted or desc in wanted:
-            b = _bounds_of(node.get("bounds", ""))
-            if b:
-                return b
-    return None
-
-
-def _wait_for_bounds(
-    labels: tuple[str, ...],
-    serial: Optional[str],
-    *,
-    retries: int = STEP_RETRIES,
-    delay: float = STEP_DELAY,
-) -> Optional[tuple[int, int, int, int]]:
-    """Poll the UI until a node matching `labels` appears; return its bounds (not a tap)."""
-    for _ in range(retries):
-        b = _find_bounds(_dump_ui(serial), labels)
-        if b:
-            return b
-        time.sleep(delay)
-    return None
-
-
-def _wait_and_tap(
-    labels: tuple[str, ...],
-    serial: Optional[str],
-    *,
-    retries: int = STEP_RETRIES,
-    delay: float = STEP_DELAY,
-) -> bool:
-    """Poll the UI until a node EXACTLY matching `labels` appears, then tap it."""
-    for _ in range(retries):
-        target = _find_tappable(_dump_ui(serial), labels)
-        if target:
-            _tap(serial, *target)
-            time.sleep(delay)
-            return True
-        time.sleep(delay)
-    return False
-
-
-def _wait_and_tap_partial(
-    substrings: tuple[str, ...],
-    serial: Optional[str],
-    *,
-    retries: int = STEP_RETRIES,
-    delay: float = STEP_DELAY,
-) -> bool:
-    """Poll the UI until a node whose label CONTAINS a substring appears, then tap it."""
-    for _ in range(retries):
-        target = _find_partial(_dump_ui(serial), substrings)
-        if target:
-            _tap(serial, *target)
-            time.sleep(delay)
-            return True
-        time.sleep(delay)
-    return False
-
-
-def _ascii_for_input(line: str) -> str:
-    """ASCII-fold a line the way `adb input text` requires (preview helper)."""
-    ascii_only = line.encode("ascii", "ignore").decode()
-    ascii_only = re.sub(r"[\"'`]", "", ascii_only)
-    return re.sub(r"[ \t]+", " ", ascii_only).strip()
-
-
-def _input_line(line: str, serial: Optional[str]) -> bool:
-    """Type one line into the focused field via `adb input text`. True if anything typed.
-
-    `adb input text` can't enter emoji/non-ASCII — those are stripped. Quotes
-    confuse the shell; spaces are encoded as %s. Returns False if nothing typeable
-    remains after stripping (so the caller can avoid submitting a blank comment).
-    """
-    safe = _ascii_for_input(line).replace(" ", "%s")
-    if not safe:
-        return False
-    run_adb(["shell", "input", "text", safe], serial=serial)
-    return True
 
 
 # ---- comment flow ------------------------------------------------------------

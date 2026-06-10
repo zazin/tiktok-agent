@@ -16,10 +16,9 @@ on TikTok's current UI, locale and A/B variant) and may be against TikTok's Term
 of Service. It fails SAFE: if the target can't be confirmed active it raises
 TikTokProfileError and the caller declines to act.
 
-The low-level UI helpers (`_dump_ui`, `_find_tappable`, `_tap`, …) are
-intentionally COPIED from tiktok_poster.py — the project has no shared adb-UI util
-module, so each feature carries its own primitives. This one module is shared by
-BOTH consumers (poster and commenter) because the account check is identical.
+The low-level UI helpers (`dump_ui`, `find_tappable`, `tap`, …) live in the shared
+`tiktok_ui` module. This module (the account check, shared by BOTH the poster and
+commenter) keeps only the profile-header / account-switcher specific logic.
 
 The phone must be unlocked and TikTok installed + logged in (with the target
 account already added to the in-app switcher).
@@ -33,10 +32,17 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 from adb_pusher import run_adb, PhonePushError
+from tiktok_ui import (
+    TIKTOK_PACKAGES,
+    STEP_DELAY,
+    STEP_RETRIES,
+    installed_package as _installed_package,
+    dump_ui as _dump_ui,
+    center_of_bounds as _center_of_bounds,
+    bounds_of as _bounds_of,
+    tap as _tap,
+)
 
-
-# TikTok package names: global app, then the older/alt package as fallback.
-TIKTOK_PACKAGES = ("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
 
 # ---- UI selectors — calibrated on-device (com.ss.android.ugc.trill, ID locale) -
 # Re-verify with a real `uiautomator dump` if TikTok's UI shifts. Discovered facts:
@@ -62,81 +68,12 @@ HANDLE_RE = re.compile(r"@[A-Za-z0-9._]*[A-Za-z][A-Za-z0-9._]*")
 # dump is available (it isn't on the feed). Kept for manual/diagnostic use.
 PROFILE_TAB_LABELS = ("Profil", "Profile", "Profilku", "Me")
 
-# Per-step pacing: how long to wait for a screen, and retries while it loads.
-STEP_DELAY = 2.5
-STEP_RETRIES = 6
+# (Per-step pacing STEP_DELAY/STEP_RETRIES and the low-level UI primitives are
+# shared via tiktok_ui.)
 
 
 class TikTokProfileError(Exception):
     """Raised when the target account can't be confirmed active (so don't act)."""
-
-
-# ---- low-level primitives (copied from tiktok_poster.py) ---------------------
-
-def _installed_package(serial: Optional[str]) -> Optional[str]:
-    """Return the first TikTok package actually installed on the device."""
-    try:
-        out = run_adb(["shell", "pm", "list", "packages"], serial=serial)
-    except PhonePushError:
-        return None
-    installed = {line.replace("package:", "").strip() for line in out.splitlines()}
-    for pkg in TIKTOK_PACKAGES:
-        if pkg in installed:
-            return pkg
-    return None
-
-
-def _dump_ui(serial: Optional[str]) -> str:
-    """Dump the current UI hierarchy XML and return it as text."""
-    run_adb(["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], serial=serial)
-    return run_adb(["shell", "cat", "/sdcard/window_dump.xml"], serial=serial)
-
-
-def _center_of_bounds(bounds: str) -> Optional[tuple[int, int]]:
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if not m:
-        return None
-    x1, y1, x2, y2 = (int(v) for v in m.groups())
-    return (x1 + x2) // 2, (y1 + y2) // 2
-
-
-def _find_tappable(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int]]:
-    """Find the center of the first node whose text/content-desc EXACTLY matches a label."""
-    try:
-        root = ET.fromstring(xml)
-    except ET.ParseError:
-        return None
-    wanted = {l.lower() for l in labels}
-    for node in root.iter("node"):
-        text = (node.get("text") or "").strip().lower()
-        desc = (node.get("content-desc") or "").strip().lower()
-        if text in wanted or desc in wanted:
-            center = _center_of_bounds(node.get("bounds", ""))
-            if center:
-                return center
-    return None
-
-
-def _tap(serial: Optional[str], x: int, y: int) -> None:
-    run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
-
-
-def _wait_and_tap(
-    labels: tuple[str, ...],
-    serial: Optional[str],
-    *,
-    retries: int = STEP_RETRIES,
-    delay: float = STEP_DELAY,
-) -> bool:
-    """Poll the UI until a node EXACTLY matching `labels` appears, then tap it. True if tapped."""
-    for _ in range(retries):
-        target = _find_tappable(_dump_ui(serial), labels)
-        if target:
-            _tap(serial, *target)
-            time.sleep(delay)
-            return True
-        time.sleep(delay)
-    return False
 
 
 # ---- account helpers ---------------------------------------------------------
@@ -144,13 +81,6 @@ def _wait_and_tap(
 def _norm(handle: Optional[str]) -> str:
     """Normalize an @handle for comparison: strip a leading @ and lowercase."""
     return (handle or "").strip().lstrip("@").lower()
-
-
-def _bounds_of(bounds: str) -> Optional[tuple[int, int, int, int]]:
-    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if not m:
-        return None
-    return tuple(int(v) for v in m.groups())  # type: ignore[return-value]
 
 
 def _first_handle(xml: str) -> Optional[str]:
