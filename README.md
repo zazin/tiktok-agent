@@ -28,8 +28,9 @@ The pipeline publishes one **QoS-1, retained-false** JSON message per post to th
 `id` is the required correlation key. The agent reports back on the status topic with `{"id": "...", "status": "posted"|"failed", "ts": <unix>}`.
 
 > **Publishing from another backend?** See [`docs/`](docs/) for the full MQTT
-> contract reference — connection/auth, both work topics (`tiktok/posts` and
-> `tiktok/comments`), exact field schemas, status messages, and QoS/ack semantics.
+> contract reference — connection/auth, all work topics (`tiktok/posts`,
+> `tiktok/comments`, `tiktok/comments-read`), exact field schemas, status messages,
+> and QoS/ack semantics.
 
 ## Files
 
@@ -44,10 +45,14 @@ live in the `core/` package.
 | `tiktok_poster.py` | Best-effort auto-post via adb UI automation (also the `tiktok-post` CLI) |
 | `tiktok_profile.py` | Read/switch the active TikTok account before acting (also the `tiktok-profile` CLI) |
 | `comment_agent.py` | Comment-on-post orchestrator + `tiktok-commenter` CLI (independent of posting) |
-| `tiktok_commenter.py` | adb UI automation to open a post by URL and submit a comment |
-| `core/mqtt_queue.py` | **Shared** durable MQTT work-queue (`MqttWorkQueue`); backs both `hivemq_source` and `comment_source` |
+| `comment_reader_agent.py` | Comment-reader orchestrator + `tiktok-comment-reader` CLI — scrape a post's comments back to the backend |
+| `tiktok_commenter.py` | adb UI automation to open a post by URL and submit a comment / reply, and scrape the comment sheet |
+| `watch_all.py` | `tiktok-watch-all` CLI — run all three watchers (posts + comments + reads) in **one** process |
+| `core/mqtt_queue.py` | **Shared** durable MQTT work-queue (`MqttWorkQueue`); backs `hivemq_source`, `comment_source`, `comment_read_source` |
 | `core/comment_source.py` | Thin comment-topic wiring over `MqttWorkQueue` (own topic/client-id/status) |
+| `core/comment_read_source.py` | Thin comment-read wiring over `MqttWorkQueue` (own topic/client-id, output = `comments-list`) |
 | `core/tiktok_ui.py` | **Shared** low-level adb/UI primitives (dump, find, tap, type, force-stop) for poster/commenter/profile |
+| `core/device_lock.py` | **Shared** cross-process `fcntl.flock` serializing device flows — only one consumer drives the phone at a time |
 | `core/adb_pusher.py` | `run_adb()` + push an image to the phone gallery over adb (+ media scan) |
 | `core/imagekit_agent.py` | Legacy `--source imagekit` orchestration (split out of `agent.py`) |
 | `core/local_store.py` | One-JSON-per-message spool dir shared by both consumers (for `--retry`) |
@@ -102,6 +107,26 @@ uv run tiktok-post /sdcard/Pictures/foo.jpg --auto-post --caption "..." --descri
 for push-only. Because it posts every queued message, run `tiktok-agent --catch-up` once first
 to clear the current backlog (drains and marks them `posted` without posting) — otherwise the
 first run posts all of it.
+
+### Run everything from one command (`tiktok-watch-all`)
+
+The poster, commenter and comment-reader are three independent consumers that can run
+as three separate processes. **`tiktok-watch-all` runs all three watchers in one
+process** (each on its own thread with its own persistent MQTT session), so a single
+command drains every topic:
+
+```bash
+uv run tiktok-watch-all --catch-up    # first: drain EVERY backlog WITHOUT acting (skip it)
+uv run tiktok-watch-all               # then: watch posts + comments + reads at once (Ctrl-C stops all)
+uv run tiktok-watch-all --no-reads    # skip a feature (also --no-posts / --no-comments)
+```
+
+**One device, one flow at a time.** Whether you run the three watchers separately or
+together, they all drive the **one** attached phone, and uiautomator can't run in
+parallel on a single device. `core/device_lock.py` is a cross-process `fcntl.flock`
+held for the whole device flow (post / comment / read); when the device is busy the
+next consumer **waits its turn** (it logs `[device] busy — waiting for the phone…`)
+rather than interleaving. So running all the watchers at once is safe.
 
 **Caption + description** come straight from the message's `Caption` and `Description`
 fields, combined into TikTok's single text field (caption first, description on the next line).
