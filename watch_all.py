@@ -17,6 +17,11 @@ Each watcher runs on a daemon thread; the paho network threads and per-queue wor
 threads are daemons too, so Ctrl-C in the main thread tears the whole process down
 cleanly. Run `--catch-up` once first (it drains every backlog WITHOUT acting), then
 start the watch — otherwise the first connect would post/comment the whole backlog.
+
+`--retry` is a one-shot (not a watcher): it re-attempts every locally-spooled post and
+comment against local disk only (no HiveMQ), then exits — the same as running
+`tiktok-agent --retry` and `tiktok-commenter --retry` back-to-back. The comment-reader
+is stateless (no spool), so there is nothing to retry for reads.
 """
 
 from __future__ import annotations
@@ -51,6 +56,30 @@ def _catch_up_all() -> None:
     _log("Catch-up done. Now run `tiktok-watch-all` to start watching.")
 
 
+def _retry_all(args) -> None:
+    """Re-attempt every locally-spooled post and comment (talks only to local disk,
+    no HiveMQ), one feature at a time, then exit. The comment-reader is stateless and
+    has no spool, so there is nothing to retry for reads. Honors --no-posts/--no-comments.
+    The device_lock serializes the two flows just like the watchers."""
+    _log("Retry: re-attempting locally-spooled work without HiveMQ...")
+    if not args.no_posts:
+        _log("posts:")
+        agent._retry_posts(
+            serial=args.serial,
+            auto_post=args.auto_post,
+            dest_dir=args.dest,
+            store_path=Path(args.posts_store_dir),
+        )
+    if not args.no_comments:
+        _log("comments:")
+        comment_agent._retry_comments(
+            serial=args.serial,
+            package=args.package,
+            store_path=Path(args.comments_store_dir),
+        )
+    _log("Retry done.")
+
+
 def _cli() -> int:
     load_env()
 
@@ -61,6 +90,11 @@ def _cli() -> int:
         "--catch-up",
         action="store_true",
         help="Drain every backlog WITHOUT acting, then exit (run once before the first watch)",
+    )
+    parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="Re-attempt locally-spooled posts + comments (no HiveMQ), then exit (reads have no spool)",
     )
     # Shared device options
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
@@ -86,6 +120,10 @@ def _cli() -> int:
 
     if args.catch_up:
         _catch_up_all()
+        return 0
+
+    if args.retry:
+        _retry_all(args)
         return 0
 
     # Each feature's blocking event-driven watch, wrapped so a thread can run it.
