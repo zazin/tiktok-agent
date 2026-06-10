@@ -15,15 +15,19 @@ Each file is self-contained (connection/auth, delivery semantics, the work-messa
 schema, and the status message) — read only the one for the feature you publish.
 
 - **[post-image.md](post-image.md)** — post an image to TikTok via `tiktok/posts`.
-- **[comment-on-post.md](comment-on-post.md)** — comment on an existing post via
-  `tiktok/comments`.
+- **[comment-on-post.md](comment-on-post.md)** — comment on, or **reply to a comment**
+  on, an existing post via `tiktok/comments` (`ReplyTo`).
+- **[read-comments.md](read-comments.md)** — **read a post's comments** so the backend
+  can generate replies: request on `tiktok/comments-read`, list back on
+  `tiktok/comments-list`. The read half of the comment-reply loop.
 
 ## At a glance
 
 | Feature | Doc | Publish to | Message | Agent reports on |
 |---------|-----|-----------|---------|------------------|
 | **Post an image** | [post-image.md](post-image.md) | `tiktok/posts` | `{ id, Caption, Description, ImageURL, ImagePath, CreatedAt }` | `tiktok/status` → `{ id, status, ts }` |
-| **Comment on a post** | [comment-on-post.md](comment-on-post.md) | `tiktok/comments` | `{ PostURL, Comment }` | `tiktok/comment-status` → `{ PostURL, status, ts }` |
+| **Comment on / reply to a post** | [comment-on-post.md](comment-on-post.md) | `tiktok/comments` | `{ PostURL, Comment, ReplyTo? }` | `tiktok/comment-status` → `{ PostURL, status, ts }` |
+| **Read a post's comments** | [read-comments.md](read-comments.md) | `tiktok/comments-read` | `{ PostURL, max? }` | `tiktok/comments-list` → `{ PostURL, comments[], count, ts }` |
 
 Both are **QoS 1, retained = false**. See each file for required vs. optional fields
 and the list of `status` values.
