@@ -42,6 +42,7 @@ DEFAULT_STATE = "agent_state.json"
 DEFAULT_INTERVAL = 60
 DEFAULT_SOURCE = "hivemq"
 DEFAULT_STORE_DIR = "queue_posts"
+DEFAULT_DEDUP_PATH = "dedup_posts.json"
 
 
 def _log(msg: str) -> None:
@@ -94,11 +95,14 @@ def process_once(
     auto_post: bool,
     dest_dir: str,
     store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
 ) -> int:
     """Run one poll cycle. Returns the number of newly processed images."""
     if source == "hivemq":
         return _process_hivemq(
-            serial=serial, auto_post=auto_post, dest_dir=dest_dir, store_path=store_path
+            serial=serial, auto_post=auto_post, dest_dir=dest_dir, store_path=store_path,
+            dedup_path=dedup_path, dedup_ttl=dedup_ttl,
         )
     from core.imagekit_agent import process_imagekit
     return process_imagekit(
@@ -106,7 +110,15 @@ def process_once(
     )
 
 
-def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> int:
+def _process_hivemq(
+    *,
+    serial: Optional[str],
+    auto_post: bool,
+    dest_dir: str,
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> int:
     """Poll the HiveMQ queue: post each pending message and report its status.
 
     Drains the backlog, posts each message, and acks (via update_status) only the
@@ -118,8 +130,11 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, st
     the instant it arrives (so nothing is lost if the broker then drops it). The file
     is deleted only on a successful post; a non-"posted" outcome or an error leaves it
     on disk (status recorded) to be re-attempted later with --retry.
+
+    If dedup_path is set, an id we already posted within dedup_ttl seconds is
+    dropped (ack as "posted") without re-posting; each successful post is recorded.
     """
-    from core import local_store
+    from core import dedup_store, local_store
     from hivemq_source import list_pending, update_status, close, HiveMQSourceError
     from imagekit_source import ImageKitSourceError
     from core.adb_pusher import PhonePushError
@@ -154,6 +169,12 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, st
                 done += 1
                 continue
 
+            if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
+                _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
+                _set_status(rec_id, "posted")  # ack-drop, no new status string
+                done += 1
+                continue
+
             # Always store on receive, before touching the phone, so a crash can't lose it.
             local_store.store(store_path, rec_id, fields)
             try:
@@ -162,6 +183,8 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, st
                     _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
                 elif status == "posted":
                     local_store.remove(store_path, rec_id)  # success → delete the file
+                    if dedup_path is not None:
+                        dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
                     _set_status(rec_id, "posted")
                 else:
                     local_store.mark(store_path, rec_id, status)
@@ -180,7 +203,15 @@ def _process_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, st
         close()
 
 
-def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> None:
+def _watch_hivemq(
+    *,
+    serial: Optional[str],
+    auto_post: bool,
+    dest_dir: str,
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> None:
     """Event-driven watch: react to each HiveMQ message the instant it arrives.
 
     Unlike the --once drain, this holds a persistent subscription (no poll
@@ -189,12 +220,13 @@ def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, stor
     to publish a status + ack the message.
 
     As in the drain path, every message is mirrored to its own JSON file on receive;
-    the file is deleted on a successful post and kept otherwise for --retry.
+    the file is deleted on a successful post and kept otherwise for --retry. With
+    dedup_path set, an id posted within dedup_ttl seconds is dropped (ack "posted").
     """
-    from core import local_store
+    from core import dedup_store, local_store
     from hivemq_source import watch, HiveMQSourceError
     from imagekit_source import ImageKitSourceError
-    from core.adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError, keep_awake
     from tiktok_poster import TikTokPostError
 
     def handler(rec: dict) -> Optional[str]:
@@ -205,6 +237,9 @@ def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, stor
         if not fields.get("ImageURL"):
             _log(f"  SKIP {rec_id}: no ImageURL")
             return "failed"  # nothing to retry without a URL
+        if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
+            _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
+            return "posted"  # ack-drop, no new status string
         # Always store on receive, before touching the phone, so a crash can't lose it.
         local_store.store(store_path, rec_id, fields)
         try:
@@ -214,6 +249,8 @@ def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, stor
                 return None
             if status == "posted":
                 local_store.remove(store_path, rec_id)  # success → delete the file
+                if dedup_path is not None:
+                    dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
                 return "posted"
             local_store.mark(store_path, rec_id, status)
             _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
@@ -225,6 +262,7 @@ def _watch_hivemq(*, serial: Optional[str], auto_post: bool, dest_dir: str, stor
             return "failed"
 
     _log("Watching HiveMQ topic (event-driven, push; Ctrl-C to stop)...")
+    keep_awake(serial)  # keep the phone from sleeping while we idle between messages
     try:
         watch(handler)
     except HiveMQSourceError as e:
@@ -259,14 +297,25 @@ def _catch_up_hivemq() -> int:
         close()
 
 
-def _retry_posts(*, serial: Optional[str], auto_post: bool, dest_dir: str, store_path: Path) -> int:
+def _retry_posts(
+    *,
+    serial: Optional[str],
+    auto_post: bool,
+    dest_dir: str,
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> int:
     """Re-attempt every post still sitting in the local spool dir (one JSON per item).
 
     Talks only to local disk (no HiveMQ): re-downloads, re-pushes, and re-posts each
     surviving file. On "posted" the file is deleted; otherwise it stays (its status and
     attempts count are updated). Returns the number that succeeded.
+
+    Retries are never deduped (they're known-failed items you asked to re-run), but a
+    successful one is recorded so a later broker redelivery of the same id is dropped.
     """
-    from core import local_store
+    from core import dedup_store, local_store
     from imagekit_source import ImageKitSourceError
     from core.adb_pusher import PhonePushError
     from tiktok_poster import TikTokPostError
@@ -288,6 +337,8 @@ def _retry_posts(*, serial: Optional[str], auto_post: bool, dest_dir: str, store
             status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
             if status == "posted":
                 local_store.remove(store_path, rec_id)
+                if dedup_path is not None:
+                    dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
                 succeeded += 1
             else:
                 local_store.mark(store_path, rec_id, status)
@@ -383,10 +434,30 @@ def _cli() -> int:
         default=DEFAULT_STORE_DIR,
         help=f"Local spool dir holding one JSON per pending post (default: {DEFAULT_STORE_DIR})",
     )
+    parser.add_argument(
+        "--dedup-store",
+        default=DEFAULT_DEDUP_PATH,
+        help=f"JSON file remembering posted ids to drop duplicate messages (default: {DEFAULT_DEDUP_PATH}; hivemq source only)",
+    )
+    parser.add_argument(
+        "--dedup-ttl",
+        type=int,
+        default=None,
+        help="Dedup window in seconds; a repeated id within it is dropped (default: $DEDUP_TTL or 86400 = 1 day)",
+    )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Disable duplicate-message dropping (post every message even if its id repeats)",
+    )
     args = parser.parse_args()
+
+    from core import dedup_store
 
     state_path = Path(args.state)
     store_path = Path(args.store_dir)
+    dedup_path = None if args.no_dedup else Path(args.dedup_store)
+    dedup_ttl = args.dedup_ttl if args.dedup_ttl is not None else dedup_store.default_ttl()
 
     if args.catch_up:
         catch_up(source=args.source, folder=args.folder, state_path=state_path)
@@ -398,7 +469,8 @@ def _cli() -> int:
 
     if args.retry:
         _retry_posts(
-            serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path
+            serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path,
+            dedup_path=dedup_path, dedup_ttl=dedup_ttl,
         )
         return 0
 
@@ -410,6 +482,8 @@ def _cli() -> int:
         auto_post=args.auto_post,
         dest_dir=args.dest,
         store_path=store_path,
+        dedup_path=dedup_path,
+        dedup_ttl=dedup_ttl,
     )
 
     if args.watch:
@@ -417,7 +491,8 @@ def _cli() -> int:
             # MQTT is push: hold a persistent subscription and react instantly.
             # No --interval (that only applies to the imagekit folder poll).
             _watch_hivemq(
-                serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path
+                serial=args.serial, auto_post=args.auto_post, dest_dir=args.dest, store_path=store_path,
+                dedup_path=dedup_path, dedup_ttl=dedup_ttl,
             )
             return 0
         _log(f"Watching {args.folder} every {args.interval}s (Ctrl-C to stop)...")

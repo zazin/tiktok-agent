@@ -7,4 +7,6 @@ __pycache__/
 agent_state.json
 queue_posts/
 queue_comments/
+dedup_posts.json
+dedup_comments.json
 downloads/

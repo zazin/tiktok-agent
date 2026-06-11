@@ -43,6 +43,20 @@ def _log(msg: str) -> None:
     print(f"[watch-all] {msg}", flush=True)
 
 
+def _dedup_config(args) -> tuple[Path | None, Path | None, int]:
+    """Resolve (posts_dedup_path, comments_dedup_path, ttl) from the CLI args.
+
+    Paths are None when --no-dedup is set (dedup off). TTL falls back to $DEDUP_TTL
+    or 86400 (1 day) when --dedup-ttl isn't given. Shared by the watchers and --retry.
+    """
+    from core import dedup_store
+
+    ttl = args.dedup_ttl if args.dedup_ttl is not None else dedup_store.default_ttl()
+    if args.no_dedup:
+        return None, None, ttl
+    return Path(args.posts_dedup_store), Path(args.comments_dedup_store), ttl
+
+
 def _catch_up_all() -> None:
     """Drain every backlog (posts, comments, read-jobs) WITHOUT acting, one feature
     at a time. Run once before the first watch so it only acts on new work."""
@@ -78,6 +92,7 @@ def _retry_all(args) -> None:
     has no spool, so there is nothing to retry for reads. Honors --no-posts/--no-comments.
     The device_lock serializes the two flows just like the watchers."""
     _log("Retry: re-attempting locally-spooled work without HiveMQ...")
+    posts_dedup, comments_dedup, dedup_ttl = _dedup_config(args)
     if not args.no_posts:
         _log("posts:")
         agent._retry_posts(
@@ -85,6 +100,8 @@ def _retry_all(args) -> None:
             auto_post=args.auto_post,
             dest_dir=args.dest,
             store_path=Path(args.posts_store_dir),
+            dedup_path=posts_dedup,
+            dedup_ttl=dedup_ttl,
         )
     if not args.no_comments:
         _log("comments:")
@@ -92,6 +109,8 @@ def _retry_all(args) -> None:
             serial=args.serial,
             package=args.package,
             store_path=Path(args.comments_store_dir),
+            dedup_path=comments_dedup,
+            dedup_ttl=dedup_ttl,
         )
     _log("Retry done.")
 
@@ -136,6 +155,11 @@ def _cli() -> int:
     parser.add_argument("--posts-store-dir", default=agent.DEFAULT_STORE_DIR, help=f"Spool dir for pending posts (default: {agent.DEFAULT_STORE_DIR})")
     # Comments (tiktok-commenter)
     parser.add_argument("--comments-store-dir", default=comment_agent.DEFAULT_STORE_DIR, help=f"Spool dir for pending comments (default: {comment_agent.DEFAULT_STORE_DIR})")
+    # Duplicate-message guard (posts + comments; default on, 1-day window)
+    parser.add_argument("--posts-dedup-store", default=agent.DEFAULT_DEDUP_PATH, help=f"JSON file remembering posted ids (default: {agent.DEFAULT_DEDUP_PATH})")
+    parser.add_argument("--comments-dedup-store", default=comment_agent.DEFAULT_DEDUP_PATH, help=f"JSON file remembering commented (post,comment) pairs (default: {comment_agent.DEFAULT_DEDUP_PATH})")
+    parser.add_argument("--dedup-ttl", type=int, default=None, help="Dedup window in seconds; a repeat within it is dropped (default: $DEDUP_TTL or 86400 = 1 day)")
+    parser.add_argument("--no-dedup", action="store_true", help="Disable duplicate dropping for posts + comments")
     # Reads (tiktok-comment-reader)
     parser.add_argument("--max", type=int, default=None, help=f"Default cap on comments scraped per post (read-job 'max' overrides; default {comment_reader_agent.DEFAULT_MAX_COMMENTS})")
     # Feature toggles (default: all on)
@@ -156,6 +180,8 @@ def _cli() -> int:
         _retry_all(args)
         return 0
 
+    posts_dedup, comments_dedup, dedup_ttl = _dedup_config(args)
+
     # Each feature's blocking event-driven watch, wrapped so a thread can run it.
     watchers: list[tuple[str, callable]] = []
     if not args.no_posts:
@@ -166,6 +192,8 @@ def _cli() -> int:
                 auto_post=args.auto_post,
                 dest_dir=args.dest,
                 store_path=Path(args.posts_store_dir),
+                dedup_path=posts_dedup,
+                dedup_ttl=dedup_ttl,
             ),
         ))
     if not args.no_comments:
@@ -176,6 +204,8 @@ def _cli() -> int:
                 package=args.package,
                 dry_run=False,
                 store_path=Path(args.comments_store_dir),
+                dedup_path=comments_dedup,
+                dedup_ttl=dedup_ttl,
             ),
         ))
     if not args.no_reads:

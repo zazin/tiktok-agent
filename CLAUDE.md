@@ -53,6 +53,7 @@ uv run tiktok-agent --once         # drain the current backlog once and exit
 uv run tiktok-agent --watch --no-auto-post   # push to phone only, leave messages unacked
 uv run tiktok-agent --retry                  # re-attempt posts still in queue_posts/ (no HiveMQ)
 uv run tiktok-agent --clear                  # delete spooled posts WITHOUT re-attempting (--failed-only keeps non-'failed')
+uv run tiktok-agent --watch --no-dedup       # disable the ~1-day duplicate-id guard (default ON; tune with --dedup-ttl SECONDS)
 uv run tiktok-agent --once --source imagekit # legacy: poll the ImageKit folder instead
 uv run tiktok-hivemq                         # inspect the HiveMQ queue (peek the backlog, no ack)
 uv run tiktok-source --folder /tiktok        # inspect the legacy ImageKit queue
@@ -103,7 +104,7 @@ The individual `tiktok-agent`/`tiktok-commenter` CLIs carry the same `--clear` /
 `--failed-only` for a single spool. The shared, non-CLI library modules live in the **`core/`** package:
 `core/mqtt_queue.py`, `core/tiktok_ui.py`, `core/imagekit_agent.py`,
 `core/adb_pusher.py`, `core/comment_source.py`, `core/comment_read_source.py`,
-`core/local_store.py`, `core/device_lock.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
+`core/local_store.py`, `core/dedup_store.py`, `core/device_lock.py`, `core/env_loader.py`. Top-level modules import them as `from core.x import …`;
 modules inside `core/` import siblings with relative imports (`from .x import …`)
 and may still reach back to top-level modules (e.g. `core/imagekit_agent.py`
 imports the top-level `imagekit_source`/`tiktok_poster`).
@@ -130,6 +131,9 @@ HIVEMQ_COMMENT_CLIENT_ID=tiktok-commenter     # optional, stable id → its own 
 # Local testing isolation (both consumers) — prepended verbatim to every topic AND
 # client-id, so a test run uses a fully isolated queue + session. Unset in prod.
 HIVEMQ_TOPIC_PREFIX=test/             # optional, e.g. "test/" → test/tiktok/posts
+
+# Duplicate-message guard (poster + commenter) — see "Duplicate-message guard" below
+DEDUP_TTL=86400                       # optional, dedup window in seconds (default 86400 = 1 day; --dedup-ttl wins; --no-dedup disables)
 
 # ImageKit — still needed to download images (and for --source imagekit)
 IMAGEKIT_PRIVATE_KEY=private_...
@@ -167,6 +171,7 @@ sequence. Each module is a single-responsibility seam with its own error type:
 | `tiktok_poster.py` | Drive TikTok's UI over adb to post (post-specific flow/labels; primitives from `tiktok_ui`) | `TikTokPostError` |
 | `tiktok_profile.py` | Read the active TikTok account and switch to a target `@handle` before acting (shared by poster + commenter; primitives from `tiktok_ui`) | `TikTokProfileError` |
 | `core/local_store.py` | One-JSON-per-message spool dir (store on receive, delete on success); shared by both consumers | — |
+| `core/dedup_store.py` | TTL-windowed "already done this" record (`seen`/`record`, 1-day default), keyed by post `id` / comment `content_key`; drops backend-republished duplicates. Shared by poster + commenter | — |
 | `core/env_loader.py` | Zero-dep `.env` loader | — |
 
 The **comment-on-post** feature is a second, independent consumer (its own
@@ -278,6 +283,29 @@ clean disconnect.
 `--catch-up` drains every queued message and marks it `posted` (publish + ack)
 without posting. **Run it once before the first `--watch`** — auto-post is ON by
 default, so otherwise the first poll posts the whole backlog.
+
+**Duplicate-message guard (`core/dedup_store.py`, default ON, ~1-day window).** The
+pipeline occasionally **republishes the same work message**; left unchecked the
+device would post/comment twice. `dedup_store` keeps a small JSON of every item it
+**actually completed** — `dedup_posts.json` keyed by post **`id`**,
+`dedup_comments.json` keyed by `content_key(PostURL, Comment)` (a sha1, so a
+*different* comment on the same post isn't blocked) — both gitignored. On each
+received message, **before touching the phone**, a key seen within the TTL is
+**acked-and-dropped without acting** and without spooling; the agent re-publishes the
+already-achieved status (`posted`/`commented`) so **no new status string / no
+cross-repo contract change** is introduced. The key is recorded only at
+**success** (`posted`/`commented`) — never on receive — which is deliberate: the
+redelivery paths **`--no-auto-post`** (never acked → broker redelivers the same id)
+and **`--retry`** (local re-attempt of *failed* items) never reach success, so they
+are **never deduped** and keep working; `--dry-run` (commenter) likewise neither
+checks nor records. A crash after the success-record but before the broker ack is
+covered too: the redelivered copy is recognized and dropped. `record()` prunes
+entries older than the TTL on every write, so the files self-trim. Window is
+`--dedup-ttl SECONDS` → `$DEDUP_TTL` → `86400` (1 day); disable with **`--no-dedup`**
+(or `--dedup-ttl 0`); relocate with `--dedup-store` (per-CLI) or
+`--posts-dedup-store`/`--comments-dedup-store` (`tiktok-watch-all`). Comment-reads are
+**not** deduped (re-reading is idempotent). The legacy ImageKit source has its own
+dedup (`agent_state.json`, below) and is unaffected.
 
 **ImageKit source (`--source imagekit`, legacy):** `agent_state.json` (gitignored)
 is `{"processed": {fileId: {name, status, ts, ...}}}`. An image is processed

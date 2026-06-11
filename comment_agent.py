@@ -35,6 +35,7 @@ from typing import Optional
 
 
 DEFAULT_STORE_DIR = "queue_comments"
+DEFAULT_DEDUP_PATH = "dedup_comments.json"
 
 # Outcomes that resolve a message for good (its spool file is deleted): a successful
 # comment, or one that can never be typed at all. needs_manual/failed are kept for retry.
@@ -56,7 +57,15 @@ def _resolve(store_path: Path, post_url: str, status: str, error: Optional[str] 
         _log(f"  kept {post_url} ({status}) in {store_path} for retry")
 
 
-def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool, store_path: Path) -> int:
+def process_once(
+    *,
+    serial: Optional[str],
+    package: Optional[str],
+    dry_run: bool,
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> int:
     """Drain the comment backlog once: comment on each message and report status.
 
     Unacked messages (a crash, or a status-publish failure) are released back to the
@@ -64,8 +73,11 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
     its own JSON file in the local spool dir on receive; the file is deleted once the
     comment lands (or can never be typed) and kept on needs_manual/failed for --retry.
     Returns the number processed.
+
+    If dedup_path is set, a (post_url, comment) we already commented within dedup_ttl
+    seconds is dropped (ack "commented") without re-commenting; each success is recorded.
     """
-    from core import local_store
+    from core import dedup_store, local_store
     from core.comment_source import list_pending, update_status, close, HiveMQSourceError
     from tiktok_commenter import comment_on_post, TikTokCommentError
     from core.adb_pusher import PhonePushError
@@ -92,6 +104,12 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
             account = rec.get("account")
             reply_to = rec.get("reply_to")
             _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
+            dkey = dedup_store.content_key(post_url, comment)
+            if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
+                _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
+                _set_status(post_url, "commented")  # ack-drop, no new status string
+                done += 1
+                continue
             # Always store on receive (except dry-run), before touching the phone.
             if not dry_run:
                 local_store.store(
@@ -107,6 +125,8 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
                 _log(f"  tiktok: {status}")
                 if not dry_run:
                     _resolve(store_path, post_url, status)
+                    if status == "commented" and dedup_path is not None:
+                        dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
                     _set_status(post_url, status)
             except (TikTokCommentError, PhonePushError) as e:
                 _log(f"  FAILED {post_url}: {e}")
@@ -120,12 +140,20 @@ def process_once(*, serial: Optional[str], package: Optional[str], dry_run: bool
         close()
 
 
-def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, store_path: Path) -> None:
+def _watch(
+    *,
+    serial: Optional[str],
+    package: Optional[str],
+    dry_run: bool,
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> None:
     """Event-driven watch: comment on each HiveMQ message the instant it arrives."""
-    from core import local_store
+    from core import dedup_store, local_store
     from core.comment_source import watch, HiveMQSourceError
     from tiktok_commenter import comment_on_post, TikTokCommentError
-    from core.adb_pusher import PhonePushError
+    from core.adb_pusher import PhonePushError, keep_awake
 
     def handler(rec: dict) -> Optional[str]:
         post_url = rec["post_url"]
@@ -133,6 +161,10 @@ def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, stor
         account = rec.get("account")
         reply_to = rec.get("reply_to")
         _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
+        dkey = dedup_store.content_key(post_url, comment)
+        if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
+            _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
+            return "commented"  # ack-drop, no new status string
         # Always store on receive (except dry-run), before touching the phone.
         if not dry_run:
             local_store.store(
@@ -150,6 +182,8 @@ def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, stor
             if dry_run:
                 return None
             _resolve(store_path, post_url, status)
+            if status == "commented" and dedup_path is not None:
+                dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
             return status
         except (TikTokCommentError, PhonePushError) as e:
             _log(f"  FAILED {post_url}: {e}")
@@ -159,6 +193,7 @@ def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, stor
             return "failed"
 
     _log("Watching HiveMQ comment topic (event-driven, push; Ctrl-C to stop)...")
+    keep_awake(serial)  # keep the phone from sleeping while we idle between messages
     try:
         watch(handler)
     except HiveMQSourceError as e:
@@ -166,14 +201,22 @@ def _watch(*, serial: Optional[str], package: Optional[str], dry_run: bool, stor
     _log("Stopped.")
 
 
-def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path: Path) -> int:
+def _retry_comments(
+    *,
+    serial: Optional[str],
+    package: Optional[str],
+    store_path: Path,
+    dedup_path: Optional[Path] = None,
+    dedup_ttl: int = 0,
+) -> int:
     """Re-attempt every comment still in the local spool dir (one JSON per item, no HiveMQ).
 
     On a terminal outcome (commented, or skipped_non_ascii) the file is deleted;
     needs_manual/failed keep the file (status and attempts updated). Returns the number
-    that actually commented.
+    that actually commented. A successful one is recorded for dedup (never checked here —
+    retries are known-pending items you asked to re-run).
     """
-    from core import local_store
+    from core import dedup_store, local_store
     from tiktok_commenter import comment_on_post, TikTokCommentError
     from core.adb_pusher import PhonePushError
 
@@ -200,6 +243,8 @@ def _retry_comments(*, serial: Optional[str], package: Optional[str], store_path
             _log(f"  tiktok: {status}")
             _resolve(store_path, post_url, status)
             if status == "commented":
+                if dedup_path is not None:
+                    dedup_store.record(dedup_path, dedup_store.content_key(post_url, comment), ttl=dedup_ttl)
                 succeeded += 1
         except (TikTokCommentError, PhonePushError) as e:
             _log(f"  FAILED {post_url}: {e}")
@@ -283,12 +328,32 @@ def _cli() -> int:
         default=DEFAULT_STORE_DIR,
         help=f"Local spool dir holding one JSON per pending comment (default: {DEFAULT_STORE_DIR})",
     )
+    parser.add_argument(
+        "--dedup-store",
+        default=DEFAULT_DEDUP_PATH,
+        help=f"JSON file remembering commented (post,comment) pairs to drop duplicates (default: {DEFAULT_DEDUP_PATH})",
+    )
+    parser.add_argument(
+        "--dedup-ttl",
+        type=int,
+        default=None,
+        help="Dedup window in seconds; a repeated (post,comment) within it is dropped (default: $DEDUP_TTL or 86400 = 1 day)",
+    )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Disable duplicate-comment dropping (submit every message even if it repeats)",
+    )
     parser.add_argument("--serial", default=None, help="Target device serial (if multiple phones connected)")
     parser.add_argument("--package", default=None, help="Override TikTok package name")
     parser.add_argument("--dry-run", action="store_true", help="Open posts and log the comment, but do NOT submit (messages left pending)")
     args = parser.parse_args()
 
+    from core import dedup_store
+
     store_path = Path(args.store_dir)
+    dedup_path = None if args.no_dedup else Path(args.dedup_store)
+    dedup_ttl = args.dedup_ttl if args.dedup_ttl is not None else dedup_store.default_ttl()
 
     if args.catch_up:
         catch_up()
@@ -299,14 +364,23 @@ def _cli() -> int:
         return 0
 
     if args.retry:
-        _retry_comments(serial=args.serial, package=args.package, store_path=store_path)
+        _retry_comments(
+            serial=args.serial, package=args.package, store_path=store_path,
+            dedup_path=dedup_path, dedup_ttl=dedup_ttl,
+        )
         return 0
 
     if args.watch:
-        _watch(serial=args.serial, package=args.package, dry_run=args.dry_run, store_path=store_path)
+        _watch(
+            serial=args.serial, package=args.package, dry_run=args.dry_run, store_path=store_path,
+            dedup_path=dedup_path, dedup_ttl=dedup_ttl,
+        )
         return 0
 
-    process_once(serial=args.serial, package=args.package, dry_run=args.dry_run, store_path=store_path)
+    process_once(
+        serial=args.serial, package=args.package, dry_run=args.dry_run, store_path=store_path,
+        dedup_path=dedup_path, dedup_ttl=dedup_ttl,
+    )
     return 0
 
 

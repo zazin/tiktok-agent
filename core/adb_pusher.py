@@ -88,6 +88,21 @@ def ensure_device(serial: Optional[str]) -> str:
     return serials[0]
 
 
+def keep_awake(serial: Optional[str] = None) -> None:
+    """Best-effort: keep the screen on + unlocked while plugged into USB.
+
+    Runs `svc power stayon true` so an idle watcher's phone never sleeps (it
+    otherwise dozes after ~10 min, leaving a dark/locked screen that breaks the
+    next post/comment flow). Reverts on reboot/unplug. Failures are logged, not
+    raised — keep-awake is a convenience, never a reason to abort a watch.
+    """
+    try:
+        run_adb(["shell", "svc", "power", "stayon", "true"], serial=serial)
+        print("[device] stay-awake enabled (svc power stayon true)", flush=True)
+    except PhonePushError as e:
+        print(f"[device] could not enable stay-awake: {e}", flush=True)
+
+
 def push_to_phone(
     image_path: str,
     *,

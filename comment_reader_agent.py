@@ -121,6 +121,7 @@ def process_once(*, serial: Optional[str], package: Optional[str], cli_max: Opti
 def _watch(*, serial: Optional[str], package: Optional[str], cli_max: Optional[int]) -> None:
     """Event-driven watch: read each post the instant a read-job arrives."""
     from core.comment_read_source import watch, publish_comments, HiveMQSourceError
+    from core.adb_pusher import keep_awake
 
     def handler(rec: dict) -> Optional[str]:
         body = _read_and_build(rec, serial=serial, package=package, cli_max=cli_max)
@@ -134,6 +135,7 @@ def _watch(*, serial: Optional[str], package: Optional[str], cli_max: Optional[i
         return None
 
     _log("Watching HiveMQ comment-read topic (event-driven, push; Ctrl-C to stop)...")
+    keep_awake(serial)  # keep the phone from sleeping while we idle between read-jobs
     try:
         watch(handler)
     except HiveMQSourceError as e:
