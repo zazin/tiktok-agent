@@ -148,6 +148,7 @@ def _process_hivemq(
     dropped (ack as "posted") without re-posting; each successful post is recorded.
     """
     from core import dedup_store, local_store
+    from core.logging_setup import bind_context, clear_context
     from hivemq_source import list_pending, update_status, close, HiveMQSourceError
     from imagekit_source import ImageKitSourceError
     from core.adb_pusher import PhonePushError
@@ -174,42 +175,46 @@ def _process_hivemq(
             fields = rec.get("fields") or {}
             if not rec_id:
                 continue
-            name = _name_for(rec_id, fields)
-
-            if not fields.get("ImageURL"):
-                _log(f"  SKIP {rec_id}: no ImageURL")
-                _set_status(rec_id, "failed")  # nothing to retry without a URL
-                done += 1
-                continue
-
-            if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
-                _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
-                _set_status(rec_id, "posted")  # ack-drop, no new status string
-                done += 1
-                continue
-
-            # Always store on receive, before touching the phone, so a crash can't lose it.
-            local_store.store(store_path, rec_id, fields)
+            bind_context(request_id=rec.get("request_id"))
             try:
-                status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
-                if not auto_post:
-                    _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
-                elif status == "posted":
-                    local_store.remove(store_path, rec_id)  # success → delete the file
-                    if dedup_path is not None:
-                        dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
-                    _set_status(rec_id, "posted")
-                else:
-                    local_store.mark(store_path, rec_id, status)
-                    _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
-                    _set_status(rec_id, "failed")
-            except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
-                logger.error(f"  FAILED {name}: {e}")
-                local_store.mark(store_path, rec_id, "failed", error=str(e))
-                _log(f"  kept {rec_id} in {store_path} for retry")
-                _set_status(rec_id, "failed")
+                name = _name_for(rec_id, fields)
 
-            done += 1
+                if not fields.get("ImageURL"):
+                    _log(f"  SKIP {rec_id}: no ImageURL")
+                    _set_status(rec_id, "failed")  # nothing to retry without a URL
+                    done += 1
+                    continue
+
+                if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
+                    _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
+                    _set_status(rec_id, "posted")  # ack-drop, no new status string
+                    done += 1
+                    continue
+
+                # Always store on receive, before touching the phone, so a crash can't lose it.
+                local_store.store(store_path, rec_id, fields)
+                try:
+                    status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+                    if not auto_post:
+                        _log(f"  pushed only (--no-auto-post); leaving {rec_id} pending")
+                    elif status == "posted":
+                        local_store.remove(store_path, rec_id)  # success → delete the file
+                        if dedup_path is not None:
+                            dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
+                        _set_status(rec_id, "posted")
+                    else:
+                        local_store.mark(store_path, rec_id, status)
+                        _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
+                        _set_status(rec_id, "failed")
+                except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
+                    logger.error(f"  FAILED {name}: {e}")
+                    local_store.mark(store_path, rec_id, "failed", error=str(e))
+                    _log(f"  kept {rec_id} in {store_path} for retry")
+                    _set_status(rec_id, "failed")
+
+                done += 1
+            finally:
+                clear_context()
 
         return done
     finally:
@@ -329,6 +334,8 @@ def _retry_posts(
     successful one is recorded so a later broker redelivery of the same id is dropped.
     """
     from core import dedup_store, local_store
+    from core.logging_setup import bind_context, clear_context
+    from core.mqtt_queue import _new_request_id
     from imagekit_source import ImageKitSourceError
     from core.adb_pusher import PhonePushError
     from tiktok_poster import TikTokPostError
@@ -338,42 +345,46 @@ def _retry_posts(
 
     succeeded = 0
     for entry in entries:
-        rec_id = entry["key"]
-        fields = entry.get("payload") or {}
-        name = _name_for(rec_id, fields)
-        if not fields.get("ImageURL"):
-            _log(f"  SKIP {rec_id}: no ImageURL in stored payload")
-            continue
-        local_store.store(store_path, rec_id, fields)  # bump attempts for this retry
-        attempt = int(entry.get("attempts", 0)) + 1
-        # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
-        # (verbatim, like _log_received) so retried items stay queryable in ES.
-        logger.info(
-            "Retry %s (attempt %s)",
-            rec_id,
-            attempt,
-            extra={
-                "es_labels": {
-                    "id": rec_id,
-                    "mqtt.direction": "retry",
-                    "mqtt.payload": json.dumps(fields, default=str),
-                    "retry.attempt": attempt,
-                }
-            },
-        )
+        bind_context(request_id=_new_request_id())
         try:
-            status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
-            if status == "posted":
-                local_store.remove(store_path, rec_id)
-                if dedup_path is not None:
-                    dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
-                succeeded += 1
-            else:
-                local_store.mark(store_path, rec_id, status)
-                _log(f"  still {status}; kept in {store_path}")
-        except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
-            logger.error(f"  FAILED {name}: {e}")
-            local_store.mark(store_path, rec_id, "failed", error=str(e))
+            rec_id = entry["key"]
+            fields = entry.get("payload") or {}
+            name = _name_for(rec_id, fields)
+            if not fields.get("ImageURL"):
+                _log(f"  SKIP {rec_id}: no ImageURL in stored payload")
+                continue
+            local_store.store(store_path, rec_id, fields)  # bump attempts for this retry
+            attempt = int(entry.get("attempts", 0)) + 1
+            # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
+            # (verbatim, like _log_received) so retried items stay queryable in ES.
+            logger.info(
+                "Retry %s (attempt %s)",
+                rec_id,
+                attempt,
+                extra={
+                    "es_labels": {
+                        "id": rec_id,
+                        "mqtt.direction": "retry",
+                        "mqtt.payload": json.dumps(fields, default=str),
+                        "retry.attempt": attempt,
+                    }
+                },
+            )
+            try:
+                status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
+                if status == "posted":
+                    local_store.remove(store_path, rec_id)
+                    if dedup_path is not None:
+                        dedup_store.record(dedup_path, rec_id, ttl=dedup_ttl)
+                    succeeded += 1
+                else:
+                    local_store.mark(store_path, rec_id, status)
+                    _log(f"  still {status}; kept in {store_path}")
+            except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
+                logger.error(f"  FAILED {name}: {e}")
+                local_store.mark(store_path, rec_id, "failed", error=str(e))
+        finally:
+            clear_context()
 
     _log(f"Retry: {succeeded} posted, {len(local_store.items(store_path))} still stored.")
     return succeeded

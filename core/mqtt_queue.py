@@ -41,7 +41,10 @@ import os
 import queue
 import threading
 import time
+import uuid
 from typing import Callable, Optional
+
+from core.logging_setup import bind_context, clear_context
 
 try:
     import paho.mqtt.client as mqtt
@@ -59,6 +62,12 @@ DRAIN_IDLE = 2.0         # seconds of silence that ends a drain
 DRAIN_HARD_CAP = 30.0    # absolute cap on one drain
 
 logger = logging.getLogger(__name__)
+
+
+def _new_request_id() -> str:
+    """A random per-execution correlation id, bound to the log context so every
+    line emitted while handling one consumed message shares `labels.request_id`."""
+    return uuid.uuid4().hex
 
 
 class HiveMQSourceError(Exception):
@@ -315,6 +324,7 @@ class MqttWorkQueue:
             if rec is None:
                 client.ack(msg.mid, msg.qos)  # drop the malformed message
                 continue
+            rec["request_id"] = _new_request_id()
             with self._lock:
                 # Last write wins if the same key appears twice in one drain; the
                 # earlier message is left unacked and redelivered next time.
@@ -458,14 +468,20 @@ class MqttWorkQueue:
             self._connected.set()
 
         def on_message(client, userdata, message) -> None:
-            self._log_received(message)
-            rec = self._parse(message)
-            if rec is None:
-                client.ack(message.mid, message.qos)  # drop malformed
-                return
-            with self._lock:
-                self._pending_msgs[self._key_of(rec)] = message
-            work.put(rec)
+            request_id = _new_request_id()
+            bind_context(request_id=request_id)
+            try:
+                self._log_received(message)
+                rec = self._parse(message)
+                if rec is None:
+                    client.ack(message.mid, message.qos)  # drop malformed
+                    return
+                rec["request_id"] = request_id
+                with self._lock:
+                    self._pending_msgs[self._key_of(rec)] = message
+                work.put(rec)
+            finally:
+                clear_context()  # network thread is reused; worker re-binds from the record
 
         client = mqtt.Client(
             CallbackAPIVersion.VERSION2,
@@ -495,6 +511,7 @@ class MqttWorkQueue:
                     rec = work.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                bind_context(request_id=rec.get("request_id"))
                 try:
                     status = handler(rec)
                 except Exception:  # handler handles its own errors; be defensive
@@ -505,6 +522,7 @@ class MqttWorkQueue:
                         self.update_status(self._key_of(rec), status)
                     except HiveMQSourceError:
                         pass
+                clear_context()
                 work.task_done()
 
         t = threading.Thread(target=worker, name=f"{self._log_prefix}-worker", daemon=True)

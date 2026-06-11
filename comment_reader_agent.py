@@ -99,6 +99,7 @@ def process_once(*, serial: Optional[str], package: Optional[str], cli_max: Opti
     close() and redelivered next time. Returns the number processed.
     """
     from core.comment_read_source import list_pending, publish_comments, close, HiveMQSourceError
+    from core.logging_setup import bind_context, clear_context
 
     try:
         try:
@@ -110,12 +111,16 @@ def process_once(*, serial: Optional[str], package: Optional[str], cli_max: Opti
         _log(f"Poll: {len(records)} pending read-job(s) in HiveMQ")
         done = 0
         for rec in records:
-            body = _read_and_build(rec, serial=serial, package=package, cli_max=cli_max)
+            bind_context(request_id=rec.get("request_id"))
             try:
-                publish_comments(rec["post_url"], body)
-            except HiveMQSourceError as e:
-                _log(f"  publish failed for {rec['post_url']}: {e}")
-            done += 1
+                body = _read_and_build(rec, serial=serial, package=package, cli_max=cli_max)
+                try:
+                    publish_comments(rec["post_url"], body)
+                except HiveMQSourceError as e:
+                    _log(f"  publish failed for {rec['post_url']}: {e}")
+                done += 1
+            finally:
+                clear_context()
         return done
     finally:
         close()
