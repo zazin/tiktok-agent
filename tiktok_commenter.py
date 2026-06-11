@@ -52,6 +52,8 @@ from core.tiktok_ui import (
     force_stop as _force_stop,
     screen_size as _screen_size,
     bounds_of as _bounds_of,
+    find_bounds as _find_bounds,
+    find_bounds_partial as _find_bounds_partial,
     wait_and_tap_partial as _wait_and_tap_partial,
     wait_for_bounds as _wait_for_bounds,
     ascii_for_input as _ascii_for_input,
@@ -109,6 +111,11 @@ SEND_BTN_X_FRAC = 0.91
 # After a successful comment, wait this long (so the submit lands) before
 # force-stopping TikTok.
 COMMENT_SUCCESS_KILL_DELAY = 8.0
+
+# After tapping send, poll the sheet this many times (with this delay) to confirm the
+# comment actually posted before reporting "commented" (see _submitted_ok).
+VERIFY_RETRIES = 4
+VERIFY_DELAY = 1.5
 
 # ---- comment-ROW selectors (for reading comments / replying to a specific one) ---
 # Calibrated on-device (com.ss.android.ugc.trill, ID locale). These resource-id leaf
@@ -317,6 +324,29 @@ def _pause_video(serial: Optional[str]) -> bool:
     return False
 
 
+def _submitted_ok(serial: Optional[str], typed_ascii: str) -> bool:
+    """Confirm the just-typed comment actually posted (True) vs. silently missed (False).
+
+    A submitted comment CLEARS the input — the placeholder hint (COMMENT_INPUT_HINTS)
+    returns — and our text shows up as a top-level comment row. If neither is true the
+    typed text is still sitting in the input box, i.e. the send tap missed and nothing
+    was posted. The keyboard is down by now (we pressed BACK), so the sheet is dumpable.
+    """
+    want = (typed_ascii or "").strip().lower()
+    for _ in range(VERIFY_RETRIES):
+        xml = _dump_ui(serial)
+        # Input cleared back to its placeholder → the comment was accepted.
+        if _find_bounds(xml, COMMENT_INPUT_HINTS):
+            return True
+        # Or our exact text now appears as a posted comment row.
+        if want:
+            for row in parse_comment_rows(xml):
+                if _ascii_for_input(row.get("text") or "").strip().lower() == want:
+                    return True
+        time.sleep(VERIFY_DELAY)
+    return False
+
+
 # ---- comment flow ------------------------------------------------------------
 
 def open_post(
@@ -415,16 +445,20 @@ def comment_on_post(
     WITHOUT opening the post, so we never comment as the wrong account.
 
     Returns one of:
-      - "commented"          — comment/reply typed and submitted,
+      - "commented"          — comment/reply typed and submitted (and, for a top-level
+                               comment, confirmed to have posted),
       - "dry_run"            — sheet + input reached; logged the comment, did NOT submit,
       - "skipped_non_ascii"  — nothing typeable after ASCII-stripping (not submitted),
       - "wrong_account"      — target account couldn't be confirmed active (not submitted),
       - "comment_not_found"  — reply target comment wasn't found in the sheet (not submitted),
+      - "send_unverified"    — typed + tapped send but the comment didn't post (text still
+                               in the input); retryable,
       - "needs_manual"       — a screen wasn't recognized.
 
     On every error outcome (wrong_account / needs_manual / skipped_non_ascii /
-    comment_not_found) TikTok is force-stopped so it isn't left open; the message stays
-    spooled for --retry. "dry_run" is the exception — it leaves the app open for inspection.
+    comment_not_found / send_unverified) TikTok is force-stopped so it isn't left open;
+    the message stays spooled for --retry. "dry_run" is the exception — it leaves the app
+    open for inspection.
 
     Raises:
         TikTokCommentError: If opening the post itself fails (no TikTok).
@@ -490,15 +524,37 @@ def comment_on_post(
         _input_line(text, serial)
         time.sleep(0.5)
 
-        # Hide the keyboard (so the send button drops back to the input row), then tap
-        # send positionally — it sits at the right end of that row. We can't dump here
-        # (the focused field blocks it), so this tap is geometric, anchored to the
-        # input field's vertical center.
+        # Hide the keyboard so the input row drops to its resting position at the bottom
+        # of the sheet AND the UI goes idle (dumpable again), then tap send positionally
+        # — it sits at the right end of that row.
+        #
+        # Crucially, re-derive the row from a FRESH dump here rather than reusing
+        # input_cy: when the post had no comments yet the sheet auto-opens with the
+        # keyboard already up, so the bounds captured above were the keyboard-UP
+        # (mid-screen) position and the send button is ~860px lower. We anchor on the
+        # text we just typed (it's the only node carrying it) to find the now-resting
+        # input row; fall back to input_cy if the dump misses (verification below still
+        # guards the outcome).
         run_adb(["shell", "input", "keyevent", "4"], serial=serial)  # BACK → hide IME
         time.sleep(1.0)
         width, _ = _screen_size(serial)
-        _tap(serial, int(width * SEND_BTN_X_FRAC), input_cy)
+        row = _find_bounds_partial(_dump_ui(serial), (typeable,))
+        send_cy = (row[1] + row[3]) // 2 if row else input_cy
+        _tap(serial, int(width * SEND_BTN_X_FRAC), send_cy)
         time.sleep(STEP_DELAY)
+
+        # Verify the comment actually posted before reporting success. A missed send
+        # leaves the text in the input with no error, so without this the agent reports
+        # "commented" for a comment that never appeared. On a top-level comment a
+        # submitted comment clears the input (placeholder returns) / shows as a row; if
+        # neither, the send missed — return a retryable status (kept in the spool, NOT
+        # recorded as a dedup success, so --retry re-attempts). Replies focus a different
+        # ("Membalas …") input whose cleared state we don't yet verify, so they keep the
+        # prior optimistic behavior (they still benefit from the re-derived send tap).
+        if reply_to is None and not _submitted_ok(serial, typeable):
+            logger.warning("  send not confirmed — comment still in input box, not posted")
+            _force_stop(pkg, serial)
+            return "send_unverified"
 
         # Commented — wait for the submit to land, then close TikTok so it isn't left
         # running (mirrors the poster's post-success force-stop).
