@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import time
 import xml.etree.ElementTree as ET
 from typing import Optional
@@ -335,11 +336,14 @@ def open_post(
             f"TikTok not found on device. Looked for: {', '.join(TIKTOK_PACKAGES)}"
         )
 
+    # `adb shell` re-parses the joined args through the device's /system/bin/sh,
+    # which splits an unquoted URL on its `&` query separators (breaking the intent
+    # and stranding `-p`). Quote the URL so the device shell sees it as one token.
     run_adb(
         [
             "shell", "am", "start",
             "-a", "android.intent.action.VIEW",
-            "-d", url,
+            "-d", shlex.quote(url),
             "-p", pkg,
         ],
         serial=serial,

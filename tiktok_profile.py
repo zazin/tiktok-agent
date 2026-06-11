@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import time
 import xml.etree.ElementTree as ET
 from typing import Optional
@@ -182,7 +183,7 @@ def _open_profile(serial: Optional[str], package: Optional[str]) -> None:
     for uri in PROFILE_DEEPLINKS:
         try:
             run_adb(
-                ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", uri, "-p", pkg],
+                ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", shlex.quote(uri), "-p", pkg],
                 serial=serial,
             )
             time.sleep(STEP_DELAY)
