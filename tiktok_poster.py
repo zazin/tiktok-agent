@@ -144,8 +144,13 @@ def _type_caption(text: str, serial: Optional[str]) -> bool:
     """
     Tap the caption/title field and type `text`. Best-effort; True if typed.
 
-    Newlines in `text` are entered as real line breaks (KEYCODE_ENTER), so a
-    combined "caption\\ndescription" lands on separate lines in the post.
+    The caption + description are typed in a single pass with the line break
+    flattened to a space. TikTok's caption box is one field whose soft-keyboard
+    ENTER fires an IME action (Done/Next-style) that steals focus — so pressing
+    KEYCODE_ENTER between "caption" and "description" left the description typed
+    into a defocused field (it never landed). Typing it as one run keeps the whole
+    text in the field; the published MQTT message still carries the original
+    newline-separated text.
     """
     field = _find_tappable(_dump_ui(serial), CAPTION_HINTS)
     if not field:
@@ -153,12 +158,8 @@ def _type_caption(text: str, serial: Optional[str]) -> bool:
     _tap(serial, *field)
     time.sleep(1.0)
 
-    for i, line in enumerate(text.split("\n")):
-        if i > 0:
-            run_adb(["shell", "input", "keyevent", "66"], serial=serial)  # ENTER -> newline
-            time.sleep(0.3)
-        _input_line(line, serial)
-        time.sleep(0.3)
+    _input_line(text.replace("\n", " "), serial)
+    time.sleep(0.3)
 
     # Dismiss the keyboard so it doesn't cover the Post button.
     run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
