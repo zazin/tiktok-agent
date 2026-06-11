@@ -48,6 +48,12 @@ DEFAULT_DEDUP_PATH = "dedup_posts.json"
 
 logger = logging.getLogger(__name__)
 
+# Post-flow statuses that mean nothing was posted (a real failure needing
+# attention), as opposed to "posted" (success) or the intentional --no-auto-post
+# "composer_open"/"pushed". Logged at ERROR so they surface in error-level log
+# queries (e.g. ES) instead of hiding among INFO records.
+FAILED_STATUSES = {"needs_manual", "wrong_account"}
+
 
 def _log(msg: str) -> None:
     logger.info(msg)
@@ -86,7 +92,10 @@ def _post_record(fields: dict, *, serial: Optional[str], auto_post: bool, dest_d
             auto_post=True,
             account=fields.get("Account"),  # switch to this @handle first (if set)
         )
-        _log(f"  tiktok: {status}")
+        logger.log(
+            logging.ERROR if status in FAILED_STATUSES else logging.INFO,
+            f"  tiktok: {status}",
+        )
         return status
 
 
@@ -195,7 +204,7 @@ def _process_hivemq(
                     _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
                     _set_status(rec_id, "failed")
             except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
-                _log(f"  FAILED {name}: {e}")
+                logger.error(f"  FAILED {name}: {e}")
                 local_store.mark(store_path, rec_id, "failed", error=str(e))
                 _log(f"  kept {rec_id} in {store_path} for retry")
                 _set_status(rec_id, "failed")
@@ -260,7 +269,7 @@ def _watch_hivemq(
             _log(f"  kept {rec_id} ({status}) in {store_path} for retry")
             return "failed"
         except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
-            _log(f"  FAILED {name}: {e}")
+            logger.error(f"  FAILED {name}: {e}")
             local_store.mark(store_path, rec_id, "failed", error=str(e))
             _log(f"  kept {rec_id} in {store_path} for retry")
             return "failed"
@@ -363,7 +372,7 @@ def _retry_posts(
                 local_store.mark(store_path, rec_id, status)
                 _log(f"  still {status}; kept in {store_path}")
         except (ImageKitSourceError, PhonePushError, TikTokPostError) as e:
-            _log(f"  FAILED {name}: {e}")
+            logger.error(f"  FAILED {name}: {e}")
             local_store.mark(store_path, rec_id, "failed", error=str(e))
 
     _log(f"Retry: {succeeded} posted, {len(local_store.items(store_path))} still stored.")
