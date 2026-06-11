@@ -64,6 +64,11 @@ CAPTION_HINTS = (
 # low-level UI primitives are shared via tiktok_ui.)
 POST_SUCCESS_KILL_DELAY = 8.0
 
+# Cap the number of hashtags in the on-device caption text; extras beyond this
+# (counting left-to-right) are dropped. The published MQTT message keeps them all.
+MAX_HASHTAGS = 5
+_HASHTAG_RE = re.compile(r"#\w+", re.UNICODE)
+
 
 logger = logging.getLogger(__name__)
 
@@ -167,18 +172,33 @@ def _type_caption(text: str, serial: Optional[str]) -> bool:
     return True
 
 
+def _limit_hashtags(text: str, limit: int = MAX_HASHTAGS) -> str:
+    """Keep only the first `limit` hashtags; drop the rest (collapsing the gap)."""
+    seen = 0
+
+    def _repl(match: "re.Match[str]") -> str:
+        nonlocal seen
+        seen += 1
+        return match.group(0) if seen <= limit else ""
+
+    capped = _HASHTAG_RE.sub(_repl, text)
+    # Tidy whitespace left where dropped hashtags used to be.
+    return re.sub(r"[ \t]{2,}", " ", capped).strip()
+
+
 def build_post_text(caption: Optional[str], description: Optional[str]) -> str:
     """
     Combine caption + description into TikTok's single text field.
 
     TikTok has only one text box, so the caption (hook + hashtags) goes first and
-    the description follows on a new line. Either may be empty.
+    the description follows on a new line. Either may be empty. Hashtags across the
+    combined text are capped at MAX_HASHTAGS (extras dropped left-to-right); the
+    published MQTT message still carries the full text.
     """
     cap = (caption or "").strip()
     desc = (description or "").strip()
-    if cap and desc:
-        return f"{cap}\n{desc}"
-    return cap or desc
+    combined = f"{cap}\n{desc}" if cap and desc else (cap or desc)
+    return _limit_hashtags(combined)
 
 
 def post(
