@@ -125,6 +125,28 @@ def find_bounds(xml: str, labels: tuple[str, ...]) -> Optional[tuple[int, int, i
     return None
 
 
+def find_bounds_partial(xml: str, substrings: tuple[str, ...]) -> Optional[tuple[int, int, int, int]]:
+    """Return the bounds of the first node whose text/content-desc CONTAINS a substring.
+
+    The bounds-returning analogue of find_partial — used to re-anchor on dynamic
+    content (e.g. a just-typed comment) whose exact label isn't known ahead of time.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+    wanted = [s.lower() for s in substrings if s]
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip().lower()
+        desc = (node.get("content-desc") or "").strip().lower()
+        haystack = f"{text}\x00{desc}"
+        if any(s in haystack for s in wanted):
+            b = bounds_of(node.get("bounds", ""))
+            if b:
+                return b
+    return None
+
+
 def tap(serial: Optional[str], x: int, y: int) -> None:
     run_adb(["shell", "input", "tap", str(x), str(y)], serial=serial)
 

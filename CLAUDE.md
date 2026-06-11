@@ -448,18 +448,36 @@ AI — the exact comment text is in the message.
   Second: once the comment input is **focused**, its blinking cursor keeps the UI
   non-idle again, so the **send button can't be found by dumping** — it's tapped
   **positionally** at the right end of the input row (`SEND_BTN_X_FRAC` × width, at
-  the input field's captured vertical center) after hiding the keyboard. The
+  the input field's vertical center) after hiding the keyboard. The
   `PAUSE_TAP_*`/`SEND_BTN_X_FRAC` fractions are the geometry knobs.
-- **Statuses (all ack-drop so a stuck UI doesn't loop):** `commented` (success),
+  Third (the **first-comment** trap, learned on-device): when a post has **no
+  comments yet**, opening the sheet **auto-focuses the input with the keyboard
+  already up**, so the input bounds captured before typing are the keyboard-UP
+  (mid-screen) position — ~860px above where the input/send row actually rests once
+  the keyboard is hidden. Reusing that Y made the send tap land in the comment list
+  and the comment was **never posted** (reported `commented` anyway). Fix: after
+  typing + hiding the keyboard, **re-derive the send row from a fresh dump** by
+  anchoring on the just-typed text (`find_bounds_partial`, the only node carrying
+  it), then tap `SEND_BTN_X_FRAC` × width at that row's Y.
+- **Submit verification (top-level comments):** the send tap is geometric and
+  silent — a miss leaves the text in the input with no error. So after tapping send,
+  `_submitted_ok` confirms the comment actually posted (the input cleared back to its
+  `COMMENT_INPUT_HINTS` placeholder, or the typed text now shows as a comment row)
+  before returning `commented`; otherwise it returns the retryable `send_unverified`.
+  Replies focus a different ("Membalas …") input that isn't verified yet, so they keep
+  the prior optimistic behavior (but still benefit from the re-derived send tap).
+- **Statuses (all ack-drop so a stuck UI doesn't loop):** `commented` (success,
+  and for a top-level comment verified to have posted),
   `needs_manual` (an unrecognized screen — stop, don't tap blindly),
   `skipped_non_ascii` (nothing typeable after stripping — not submitted),
   `wrong_account` (target `Account` couldn't be confirmed active — not submitted),
+  `send_unverified` (typed + tapped send but the comment didn't post — retryable),
   `failed` (open/adb error). On success TikTok is force-stopped after
   `COMMENT_SUCCESS_KILL_DELAY`; on every **error** outcome
-  (`needs_manual`/`skipped_non_ascii`/`wrong_account`) it is force-stopped
-  **immediately** so it's never left open. `--dry-run` opens + focuses the input and
-  logs the comment but **never submits**, leaves the message unacked, and is the one
-  path that leaves the app open (for inspection).
+  (`needs_manual`/`skipped_non_ascii`/`wrong_account`/`send_unverified`) it is
+  force-stopped **immediately** so it's never left open. `--dry-run` opens + focuses
+  the input and logs the comment but **never submits**, leaves the message unacked,
+  and is the one path that leaves the app open (for inspection).
 - **Local spool dir (mirrors the poster):** every received comment is mirrored to its
   own JSON file in `queue_comments/` on receive (keyed by `PostURL`, payload
   `{post_url, comment, account}`, via the shared `local_store.py`), before the phone is
@@ -472,7 +490,8 @@ AI — the exact comment text is in the message.
 - **Same brittleness + defensiveness as the poster:** the UI labels live in the
   constants block at the top of `tiktok_commenter.py` (`COMMENT_OPEN_SUBSTRINGS`,
   `COMMENT_INPUT_HINTS`, `PAUSE_TAP_X_FRAC`/`PAUSE_TAP_Y_FRAC`, `SEND_BTN_X_FRAC`,
-  `COMMENT_SUCCESS_KILL_DELAY`; `STEP_DELAY`/`STEP_RETRIES` are imported from
+  `COMMENT_SUCCESS_KILL_DELAY`, `VERIFY_RETRIES`/`VERIFY_DELAY`; `STEP_DELAY`/
+  `STEP_RETRIES` are imported from
   `tiktok_ui`) — **guesses that must be calibrated on-device against a real
   `uiautomator dump`.** (The send button has **no** label constant — see the
   positional-tap calibration fact above.)

@@ -46,7 +46,7 @@ _TERMINAL = ("commented", "skipped_non_ascii")
 # Comment-flow statuses that mean nothing was commented (a real failure needing
 # attention), vs. "commented" (success) or "skipped_non_ascii" (nothing typeable —
 # expected/terminal). Logged at ERROR so they surface in error-level log queries (e.g. ES).
-FAILED_STATUSES = {"needs_manual", "wrong_account", "comment_not_found", "failed"}
+FAILED_STATUSES = {"needs_manual", "wrong_account", "comment_not_found", "send_unverified", "failed"}
 
 logger = logging.getLogger(__name__)
 
