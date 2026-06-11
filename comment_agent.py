@@ -92,6 +92,7 @@ def process_once(
     seconds is dropped (ack "commented") without re-commenting; each success is recorded.
     """
     from core import dedup_store, local_store
+    from core.logging_setup import bind_context, clear_context
     from core.comment_source import list_pending, update_status, close, HiveMQSourceError
     from tiktok_commenter import comment_on_post, TikTokCommentError
     from core.adb_pusher import PhonePushError
@@ -113,41 +114,45 @@ def process_once(
 
         done = 0
         for rec in records:
-            post_url = rec["post_url"]
-            comment = rec["comment"]
-            account = rec.get("account")
-            reply_to = rec.get("reply_to")
-            _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
-            dkey = dedup_store.content_key(post_url, comment)
-            if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
-                _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
-                _set_status(post_url, "commented")  # ack-drop, no new status string
-                done += 1
-                continue
-            # Always store on receive (except dry-run), before touching the phone.
-            if not dry_run:
-                local_store.store(
-                    store_path,
-                    post_url,
-                    {"post_url": post_url, "comment": comment, "account": account, "reply_to": reply_to},
-                )
+            bind_context(request_id=rec.get("request_id"))
             try:
-                status = comment_on_post(
-                    post_url, comment, serial=serial, package=package, dry_run=dry_run,
-                    account=account, reply_to=reply_to,
-                )
-                _log_status(status)
+                post_url = rec["post_url"]
+                comment = rec["comment"]
+                account = rec.get("account")
+                reply_to = rec.get("reply_to")
+                _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
+                dkey = dedup_store.content_key(post_url, comment)
+                if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
+                    _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
+                    _set_status(post_url, "commented")  # ack-drop, no new status string
+                    done += 1
+                    continue
+                # Always store on receive (except dry-run), before touching the phone.
                 if not dry_run:
-                    _resolve(store_path, post_url, status)
-                    if status == "commented" and dedup_path is not None:
-                        dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
-                    _set_status(post_url, status)
-            except (TikTokCommentError, PhonePushError) as e:
-                logger.error(f"  FAILED {post_url}: {e}")
-                if not dry_run:
-                    _resolve(store_path, post_url, "failed", error=str(e))
-                    _set_status(post_url, "failed")
-            done += 1
+                    local_store.store(
+                        store_path,
+                        post_url,
+                        {"post_url": post_url, "comment": comment, "account": account, "reply_to": reply_to},
+                    )
+                try:
+                    status = comment_on_post(
+                        post_url, comment, serial=serial, package=package, dry_run=dry_run,
+                        account=account, reply_to=reply_to,
+                    )
+                    _log_status(status)
+                    if not dry_run:
+                        _resolve(store_path, post_url, status)
+                        if status == "commented" and dedup_path is not None:
+                            dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
+                        _set_status(post_url, status)
+                except (TikTokCommentError, PhonePushError) as e:
+                    logger.error(f"  FAILED {post_url}: {e}")
+                    if not dry_run:
+                        _resolve(store_path, post_url, "failed", error=str(e))
+                        _set_status(post_url, "failed")
+                done += 1
+            finally:
+                clear_context()
 
         return done
     finally:
@@ -231,6 +236,8 @@ def _retry_comments(
     retries are known-pending items you asked to re-run).
     """
     from core import dedup_store, local_store
+    from core.logging_setup import bind_context, clear_context
+    from core.mqtt_queue import _new_request_id
     from tiktok_commenter import comment_on_post, TikTokCommentError
     from core.adb_pusher import PhonePushError
 
@@ -239,45 +246,49 @@ def _retry_comments(
 
     succeeded = 0
     for entry in entries:
-        post_url = entry["key"]
-        payload = entry.get("payload") or {}
-        comment = payload.get("comment")
-        account = payload.get("account")
-        reply_to = payload.get("reply_to")
-        if not post_url or not comment:
-            _log(f"  SKIP {post_url}: missing post_url/comment in stored payload")
-            continue
-        local_store.store(store_path, post_url, payload)  # bump attempts for this retry
-        attempt = int(entry.get("attempts", 0)) + 1
-        # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
-        # (verbatim, like _log_received) so retried items stay queryable in ES.
-        logger.info(
-            "Retry %s (attempt %s)",
-            post_url,
-            attempt,
-            extra={
-                "es_labels": {
-                    "PostURL": post_url,
-                    "mqtt.direction": "retry",
-                    "mqtt.payload": json.dumps(payload, default=str),
-                    "retry.attempt": attempt,
-                }
-            },
-        )
+        bind_context(request_id=_new_request_id())
         try:
-            status = comment_on_post(
-                post_url, comment, serial=serial, package=package, dry_run=False,
-                account=account, reply_to=reply_to,
+            post_url = entry["key"]
+            payload = entry.get("payload") or {}
+            comment = payload.get("comment")
+            account = payload.get("account")
+            reply_to = payload.get("reply_to")
+            if not post_url or not comment:
+                _log(f"  SKIP {post_url}: missing post_url/comment in stored payload")
+                continue
+            local_store.store(store_path, post_url, payload)  # bump attempts for this retry
+            attempt = int(entry.get("attempts", 0)) + 1
+            # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
+            # (verbatim, like _log_received) so retried items stay queryable in ES.
+            logger.info(
+                "Retry %s (attempt %s)",
+                post_url,
+                attempt,
+                extra={
+                    "es_labels": {
+                        "PostURL": post_url,
+                        "mqtt.direction": "retry",
+                        "mqtt.payload": json.dumps(payload, default=str),
+                        "retry.attempt": attempt,
+                    }
+                },
             )
-            _log_status(status)
-            _resolve(store_path, post_url, status)
-            if status == "commented":
-                if dedup_path is not None:
-                    dedup_store.record(dedup_path, dedup_store.content_key(post_url, comment), ttl=dedup_ttl)
-                succeeded += 1
-        except (TikTokCommentError, PhonePushError) as e:
-            logger.error(f"  FAILED {post_url}: {e}")
-            _resolve(store_path, post_url, "failed", error=str(e))
+            try:
+                status = comment_on_post(
+                    post_url, comment, serial=serial, package=package, dry_run=False,
+                    account=account, reply_to=reply_to,
+                )
+                _log_status(status)
+                _resolve(store_path, post_url, status)
+                if status == "commented":
+                    if dedup_path is not None:
+                        dedup_store.record(dedup_path, dedup_store.content_key(post_url, comment), ttl=dedup_ttl)
+                    succeeded += 1
+            except (TikTokCommentError, PhonePushError) as e:
+                logger.error(f"  FAILED {post_url}: {e}")
+                _resolve(store_path, post_url, "failed", error=str(e))
+        finally:
+            clear_context()
 
     _log(f"Retry: {succeeded} commented, {len(local_store.items(store_path))} still stored.")
     return succeeded
