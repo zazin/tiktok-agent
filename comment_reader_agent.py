@@ -88,7 +88,7 @@ def _read_and_build(rec: dict, *, serial, package, cli_max) -> dict:
             return _result_body(post_url, comments)
         return _result_body(post_url, [], error=status)
     except (TikTokCommentError, PhonePushError) as e:
-        _log(f"  FAILED {post_url}: {e}")
+        logger.error(f"  FAILED {post_url}: {e}")
         return _result_body(post_url, [], error=f"failed: {e}")
 
 
