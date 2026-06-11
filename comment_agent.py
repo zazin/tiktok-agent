@@ -123,7 +123,7 @@ def process_once(
                 _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
                 dkey = dedup_store.content_key(post_url, comment)
                 if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
-                    _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
+                    logger.warning(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
                     _set_status(post_url, "commented")  # ack-drop, no new status string
                     done += 1
                     continue
@@ -182,7 +182,7 @@ def _watch(
         _log(f"{'Reply' if reply_to else 'Comment'} on {post_url}")
         dkey = dedup_store.content_key(post_url, comment)
         if not dry_run and dedup_path is not None and dedup_store.seen(dedup_path, dkey, ttl=dedup_ttl):
-            _log(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
+            logger.warning(f"  SKIP {post_url}: duplicate comment within {dedup_ttl}s window")
             return "commented"  # ack-drop, no new status string
         # Always store on receive (except dry-run), before touching the phone.
         if not dry_run:
