@@ -16,14 +16,17 @@ so a crash mid-batch doesn't reprocess completed work.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _load_state(path: Path) -> dict:

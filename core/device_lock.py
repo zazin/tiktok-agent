@@ -21,10 +21,13 @@ busy the next consumer BLOCKS (waits its turn) rather than dropping work.
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _lock_path(serial: Optional[str]) -> str:
@@ -35,7 +38,7 @@ def _lock_path(serial: Optional[str]) -> str:
 
 @contextmanager
 def device_lock(
-    serial: Optional[str] = None, *, log: Callable[[str], None] = print
+    serial: Optional[str] = None, *, log: Callable[[str], None] = None
 ) -> Iterator[None]:
     """
     Hold an exclusive cross-process lock on the device for the whole `with` body.
@@ -43,6 +46,7 @@ def device_lock(
     Tries to acquire without blocking first so we only log "waiting" when actually
     contended, then falls back to a blocking acquire (the strict one-by-one queue).
     """
+    log = log or logger.warning
     path = _lock_path(serial)
     f = open(path, "w")
     try:

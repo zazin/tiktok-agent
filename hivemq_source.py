@@ -38,12 +38,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from typing import Optional
 
 import paho.mqtt.client as mqtt
 
 from core.mqtt_queue import HiveMQSourceError, MqttWorkQueue, make_config
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_TOPIC = "tiktok/posts"
@@ -124,7 +127,9 @@ def watch(handler) -> None:
 
 def _cli() -> int:
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-hivemq")
 
     parser = argparse.ArgumentParser(
         description="Peek the HiveMQ work-topic backlog (does not acknowledge/consume)."
@@ -137,7 +142,7 @@ def _cli() -> int:
         # update_status and close() without acking, they stay queued for the agent.
         records = list_pending()
     except HiveMQSourceError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         return 1
     finally:
         # Reset the ack registry so close() can't ack anything we peeked.

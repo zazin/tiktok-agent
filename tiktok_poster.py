@@ -18,6 +18,7 @@ The phone must be unlocked and TikTok installed + logged in.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Optional
@@ -62,6 +63,9 @@ CAPTION_HINTS = (
 # force-stopping TikTok. (Per-step pacing STEP_DELAY/STEP_RETRIES and the
 # low-level UI primitives are shared via tiktok_ui.)
 POST_SUCCESS_KILL_DELAY = 8.0
+
+
+logger = logging.getLogger(__name__)
 
 
 class TikTokPostError(Exception):
@@ -213,7 +217,7 @@ def post(
             try:
                 ensure_account(account, serial=serial, package=package)
             except TikTokProfileError as e:
-                print(f"  wrong account: {e}", flush=True)
+                logger.warning("  wrong account: %s", e)
                 _force_stop(package, serial)  # don't leave TikTok open on an error
                 return "wrong_account"
 
@@ -288,7 +292,9 @@ def _cli() -> int:
     import argparse
     import sys
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-post")
 
     parser = argparse.ArgumentParser(
         description="Post an image that is ALREADY on the phone to TikTok (no download)."
@@ -326,7 +332,7 @@ def _cli() -> int:
             print(f"From ImageKit — caption: {caption!r}")
             print(f"             description: {(description or '')[:70]!r}")
         else:
-            print(f"From ImageKit — no metadata found for {args.path.rsplit('/', 1)[-1]}", file=sys.stderr)
+            logger.warning("From ImageKit — no metadata found for %s", args.path.rsplit('/', 1)[-1])
 
     try:
         status = post(
@@ -339,10 +345,10 @@ def _cli() -> int:
             account=args.account,
         )
     except TikTokPostError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         return 1
 
-    print(f"Result: {status}")
+    logger.info("Result: %s", status)
     return 0
 
 
