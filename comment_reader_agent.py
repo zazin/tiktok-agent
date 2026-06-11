@@ -36,6 +36,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -44,9 +45,11 @@ from typing import Optional
 
 DEFAULT_MAX_COMMENTS = 10
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _resolve_max(rec: dict, cli_max: Optional[int]) -> int:
@@ -170,7 +173,9 @@ def catch_up() -> int:
 
 def _cli() -> int:
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-comment-reader")
 
     parser = argparse.ArgumentParser(
         description="Drain the HiveMQ comment-read queue, scrape each post's comments, and publish the list."

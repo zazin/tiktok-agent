@@ -36,9 +36,9 @@ Each instance is parameterized by:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
-import sys
 import threading
 import time
 from typing import Callable, Optional
@@ -57,6 +57,8 @@ DEFAULT_PORT = 8883
 CONNECT_TIMEOUT = 15.0   # seconds to wait for CONNACK
 DRAIN_IDLE = 2.0         # seconds of silence that ends a drain
 DRAIN_HARD_CAP = 30.0    # absolute cap on one drain
+
+logger = logging.getLogger(__name__)
 
 
 class HiveMQSourceError(Exception):
@@ -160,21 +162,46 @@ class MqttWorkQueue:
     # ---- logging -------------------------------------------------------------
 
     def _log_received(self, message: mqtt.MQTTMessage) -> None:
-        """Always log every message the moment it arrives, before any validation."""
-        body = message.payload[:1000].decode("utf-8", "replace")
-        print(
-            f"{self._log_prefix}: received on {message.topic!r} "
-            f"(qos={message.qos}, {len(message.payload)} bytes): {body}",
-            flush=True,
+        """Always log every message the moment it arrives, before any validation.
+
+        The console line is truncated for readability, but the **full** payload is
+        attached as a structured field so it is stored verbatim in Elasticsearch.
+        """
+        full = message.payload.decode("utf-8", "replace")
+        snippet = full[:1000]
+        logger.info(
+            "%s: received on %r (qos=%s, %s bytes): %s",
+            self._log_prefix,
+            message.topic,
+            message.qos,
+            len(message.payload),
+            snippet,
+            extra={
+                "es_labels": {
+                    "mqtt.topic": message.topic,
+                    "mqtt.qos": message.qos,
+                    "mqtt.bytes": len(message.payload),
+                    "mqtt.payload": full,
+                }
+            },
         )
 
     def _warn(self, reason: str, message: mqtt.MQTTMessage) -> None:
-        """Log (to stderr) a malformed message that is about to be acked + dropped."""
-        snippet = message.payload[:200].decode("utf-8", "replace")
-        print(
-            f"{self._log_prefix}: dropping message on {message.topic!r}: {reason} — {snippet}",
-            file=sys.stderr,
-            flush=True,
+        """Log a malformed message that is about to be acked + dropped (full payload to ES)."""
+        full = message.payload.decode("utf-8", "replace")
+        logger.warning(
+            "%s: dropping message on %r: %s — %s",
+            self._log_prefix,
+            message.topic,
+            reason,
+            full[:200],
+            extra={
+                "es_labels": {
+                    "mqtt.topic": message.topic,
+                    "mqtt.payload": full,
+                    "drop.reason": reason,
+                }
+            },
         )
 
     def _parse(self, message: mqtt.MQTTMessage) -> Optional[dict]:
@@ -311,6 +338,20 @@ class MqttWorkQueue:
             raise HiveMQSourceError("update_status called before a successful list_pending/connect")
 
         body = json.dumps({self._status_key_name: key, "status": status, "ts": int(time.time())})
+        logger.info(
+            "%s: publishing to %r: %s",
+            self._log_prefix,
+            self._config.status_topic,
+            body,
+            extra={
+                "es_labels": {
+                    "mqtt.topic": self._config.status_topic,
+                    "mqtt.payload": body,
+                    "mqtt.direction": "publish",
+                    "status": status,
+                }
+            },
+        )
         info = self._client.publish(self._config.status_topic, body, qos=1)
         try:
             info.wait_for_publish(timeout)
@@ -335,7 +376,21 @@ class MqttWorkQueue:
         if self._client is None or self._config is None:
             raise HiveMQSourceError("publish_result called before a successful list_pending/connect")
 
-        info = self._client.publish(self._config.status_topic, json.dumps(body), qos=1)
+        payload = json.dumps(body)
+        logger.info(
+            "%s: publishing to %r: %s",
+            self._log_prefix,
+            self._config.status_topic,
+            payload[:1000],
+            extra={
+                "es_labels": {
+                    "mqtt.topic": self._config.status_topic,
+                    "mqtt.payload": payload,
+                    "mqtt.direction": "publish",
+                }
+            },
+        )
+        info = self._client.publish(self._config.status_topic, payload, qos=1)
         try:
             info.wait_for_publish(timeout)
         except (ValueError, RuntimeError) as e:
@@ -443,6 +498,7 @@ class MqttWorkQueue:
                 try:
                     status = handler(rec)
                 except Exception:  # handler handles its own errors; be defensive
+                    logger.exception("%s: handler failed", self._log_prefix)
                     status = "failed"
                 if status:
                     try:

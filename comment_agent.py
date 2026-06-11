@@ -29,6 +29,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -41,9 +42,11 @@ DEFAULT_DEDUP_PATH = "dedup_comments.json"
 # comment, or one that can never be typed at all. needs_manual/failed are kept for retry.
 _TERMINAL = ("commented", "skipped_non_ascii")
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _resolve(store_path: Path, post_url: str, status: str, error: Optional[str] = None) -> None:
@@ -295,7 +298,9 @@ def catch_up() -> int:
 
 def _cli() -> int:
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-commenter")
 
     parser = argparse.ArgumentParser(
         description="Drain the HiveMQ comment queue and comment on each TikTok post over adb."

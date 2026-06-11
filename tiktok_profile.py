@@ -26,6 +26,7 @@ account already added to the in-app switcher).
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -70,6 +71,9 @@ PROFILE_TAB_LABELS = ("Profil", "Profile", "Profilku", "Me")
 
 # (Per-step pacing STEP_DELAY/STEP_RETRIES and the low-level UI primitives are
 # shared via tiktok_ui.)
+
+
+logger = logging.getLogger(__name__)
 
 
 class TikTokProfileError(Exception):
@@ -257,7 +261,9 @@ def _cli() -> int:
     import argparse
     import sys
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-profile")
 
     parser = argparse.ArgumentParser(
         description="Read or switch the active TikTok account over adb (calibration tool)."
@@ -270,14 +276,14 @@ def _cli() -> int:
     try:
         if not args.account:
             handle = current_account(args.serial, args.package)
-            print(f"Current account: {handle or 'unknown'}")
+            logger.info("Current account: %s", handle or 'unknown')
             return 0
         ensure_account(args.account, serial=args.serial, package=args.package)
     except (TikTokProfileError, PhonePushError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         return 1
 
-    print(f"Active account is now @{_norm(args.account)}")
+    logger.info("Active account is now @%s", _norm(args.account))
     return 0
 
 

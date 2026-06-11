@@ -31,6 +31,7 @@ the comment-specific screen labels and flow (e.g. `_pause_video`) live here.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -55,6 +56,9 @@ from core.tiktok_ui import (
     ascii_for_input as _ascii_for_input,
     input_line as _input_line,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---- UI selectors — GUESSES that must be calibrated on-device ----------------
@@ -428,7 +432,7 @@ def comment_on_post(
             try:
                 ensure_account(account, serial=serial, package=package)
             except TikTokProfileError as e:
-                print(f"  wrong account: {e}", flush=True)
+                logger.warning("  wrong account: %s", e)
                 _force_stop(package, serial)  # don't leave TikTok open on an error
                 return "wrong_account"
 
@@ -461,7 +465,7 @@ def comment_on_post(
             # Reply mode: find the target comment row and tap its Reply button, which
             # auto-focuses the input ("Membalas <author>"); no separate input tap needed.
             if not _find_and_tap_reply(serial, reply_to.get("author", ""), reply_to.get("text")):
-                print(f"  reply target not found: {reply_to}", flush=True)
+                logger.warning("  reply target not found: %s", reply_to)
                 _force_stop(pkg, serial)
                 return "comment_not_found"
         else:
@@ -476,7 +480,7 @@ def comment_on_post(
             return "skipped_non_ascii"
 
         if dry_run:
-            print(f"  [dry-run] would comment {typeable!r} on {url}", flush=True)
+            logger.info("  [dry-run] would comment %r on %s", typeable, url)
             return "dry_run"
 
         _input_line(text, serial)
@@ -503,7 +507,9 @@ def _cli() -> int:
     import argparse
     import sys
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-commenter")
 
     parser = argparse.ArgumentParser(
         description="Comment on a TikTok post by URL over adb (single shot, no MQTT)."
@@ -533,10 +539,10 @@ def _cli() -> int:
             reply_to=reply_to,
         )
     except (TikTokCommentError, PhonePushError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         return 1
 
-    print(f"Result: {status}")
+    logger.info("Result: %s", status)
     return 0
 
 

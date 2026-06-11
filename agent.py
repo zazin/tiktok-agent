@@ -30,6 +30,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import tempfile
 import time
@@ -44,9 +45,11 @@ DEFAULT_SOURCE = "hivemq"
 DEFAULT_STORE_DIR = "queue_posts"
 DEFAULT_DEDUP_PATH = "dedup_posts.json"
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _name_for(rec_id: Optional[str], fields: dict) -> str:
@@ -384,7 +387,9 @@ def catch_up(*, source: str, folder: str, state_path: Path) -> int:
 
 def _cli() -> int:
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-agent")
 
     parser = argparse.ArgumentParser(
         description="Poll the work queue, push new images to a connected phone, and auto-post them to TikTok."

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -41,9 +42,11 @@ from typing import Optional
 DEFAULT_POST_DIR = "queue_posts"
 DEFAULT_COMMENT_DIR = "queue_comments"
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _filename(key: str) -> str:

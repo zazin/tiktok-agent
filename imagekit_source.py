@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import sys
 import urllib.error
@@ -40,6 +41,8 @@ from typing import Optional
 
 
 IMAGEKIT_LIST_URL = "https://api.imagekit.io/v1/files"
+
+logger = logging.getLogger(__name__)
 
 
 class ImageKitSourceError(Exception):
@@ -131,7 +134,9 @@ def download(url: str, dest: str | os.PathLike, *, timeout: int = 120) -> Path:
 
 def _cli() -> int:
     from core.env_loader import load_env
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-source")
 
     parser = argparse.ArgumentParser(description="List/download images from an ImageKit folder.")
     parser.add_argument("--folder", default="/tiktok", help="ImageKit folder (default: /tiktok)")
@@ -143,7 +148,7 @@ def _cli() -> int:
     try:
         files = list_images(folder=args.folder, limit=args.limit)
     except ImageKitSourceError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("Error: %s", e)
         return 1
 
     if args.json:
@@ -157,9 +162,9 @@ def _cli() -> int:
         for f in files:
             try:
                 out = download(f["url"], Path(args.download) / f["name"])
-                print(f"Downloaded: {out}")
+                logger.info("Downloaded: %s", out)
             except (ImageKitSourceError, KeyError) as e:
-                print(f"Failed to download {f.get('name')}: {e}", file=sys.stderr)
+                logger.error("Failed to download %s: %s", f.get('name'), e)
 
     return 0
 

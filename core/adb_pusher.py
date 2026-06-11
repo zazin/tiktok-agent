@@ -16,6 +16,7 @@ Requirements:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,8 @@ from typing import Optional
 
 # Pictures shows up in Gallery; Download is easier to find in a file manager.
 DEFAULT_DEST = "/sdcard/Pictures"
+
+logger = logging.getLogger(__name__)
 
 
 class PhonePushError(Exception):
@@ -98,9 +101,9 @@ def keep_awake(serial: Optional[str] = None) -> None:
     """
     try:
         run_adb(["shell", "svc", "power", "stayon", "true"], serial=serial)
-        print("[device] stay-awake enabled (svc power stayon true)", flush=True)
+        logger.info("[device] stay-awake enabled (svc power stayon true)")
     except PhonePushError as e:
-        print(f"[device] could not enable stay-awake: {e}", flush=True)
+        logger.warning("[device] could not enable stay-awake: %s", e)
 
 
 def push_to_phone(

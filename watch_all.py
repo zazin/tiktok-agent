@@ -27,6 +27,7 @@ is stateless (no spool), so there is nothing to retry for reads.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import threading
 import time
@@ -38,9 +39,11 @@ import agent
 import comment_agent
 import comment_reader_agent
 
+logger = logging.getLogger(__name__)
+
 
 def _log(msg: str) -> None:
-    print(f"[watch-all] {msg}", flush=True)
+    logger.info(msg)
 
 
 def _dedup_config(args) -> tuple[Path | None, Path | None, int]:
@@ -116,7 +119,9 @@ def _retry_all(args) -> None:
 
 
 def _cli() -> int:
+    from core.logging_setup import setup_logging
     load_env()
+    setup_logging("tiktok-watch-all")
 
     parser = argparse.ArgumentParser(
         description="Watch all HiveMQ topics (posts + comments + comment-reads) in one process.",
