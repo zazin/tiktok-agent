@@ -29,6 +29,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -237,7 +238,22 @@ def _retry_comments(
             _log(f"  SKIP {post_url}: missing post_url/comment in stored payload")
             continue
         local_store.store(store_path, post_url, payload)  # bump attempts for this retry
-        _log(f"Retry {post_url} (attempt {int(entry.get('attempts', 0)) + 1})")
+        attempt = int(entry.get("attempts", 0)) + 1
+        # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
+        # (verbatim, like _log_received) so retried items stay queryable in ES.
+        logger.info(
+            "Retry %s (attempt %s)",
+            post_url,
+            attempt,
+            extra={
+                "es_labels": {
+                    "PostURL": post_url,
+                    "mqtt.direction": "retry",
+                    "mqtt.payload": json.dumps(payload, default=str),
+                    "retry.attempt": attempt,
+                }
+            },
+        )
         try:
             status = comment_on_post(
                 post_url, comment, serial=serial, package=package, dry_run=False,
