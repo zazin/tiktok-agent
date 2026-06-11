@@ -30,6 +30,7 @@ Usage (CLI):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import tempfile
@@ -335,7 +336,22 @@ def _retry_posts(
             _log(f"  SKIP {rec_id}: no ImageURL in stored payload")
             continue
         local_store.store(store_path, rec_id, fields)  # bump attempts for this retry
-        _log(f"Retry {rec_id} (attempt {int(entry.get('attempts', 0)) + 1})")
+        attempt = int(entry.get("attempts", 0)) + 1
+        # Retry skips HiveMQ, so mqtt_queue never logs the payload — attach it here
+        # (verbatim, like _log_received) so retried items stay queryable in ES.
+        logger.info(
+            "Retry %s (attempt %s)",
+            rec_id,
+            attempt,
+            extra={
+                "es_labels": {
+                    "id": rec_id,
+                    "mqtt.direction": "retry",
+                    "mqtt.payload": json.dumps(fields, default=str),
+                    "retry.attempt": attempt,
+                }
+            },
+        )
         try:
             status = _post_record(fields, serial=serial, auto_post=auto_post, dest_dir=dest_dir)
             if status == "posted":
