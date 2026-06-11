@@ -186,7 +186,7 @@ def _process_hivemq(
                     continue
 
                 if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
-                    _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
+                    logger.warning(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
                     _set_status(rec_id, "posted")  # ack-drop, no new status string
                     done += 1
                     continue
@@ -256,7 +256,7 @@ def _watch_hivemq(
             _log(f"  SKIP {rec_id}: no ImageURL")
             return "failed"  # nothing to retry without a URL
         if dedup_path is not None and dedup_store.seen(dedup_path, rec_id, ttl=dedup_ttl):
-            _log(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
+            logger.warning(f"  SKIP {rec_id}: duplicate within {dedup_ttl}s window")
             return "posted"  # ack-drop, no new status string
         # Always store on receive, before touching the phone, so a crash can't lose it.
         local_store.store(store_path, rec_id, fields)
