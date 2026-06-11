@@ -19,6 +19,7 @@ The phone must be unlocked and TikTok installed + logged in for any of this to w
 from __future__ import annotations
 
 import re
+import shlex
 import time
 import xml.etree.ElementTree as ET
 from typing import Optional
@@ -240,5 +241,10 @@ def input_line(line: str, serial: Optional[str]) -> bool:
     safe = ascii_for_input(line).replace(" ", "%s")
     if not safe:
         return False
-    run_adb(["shell", "input", "text", safe], serial=serial)
+    # `adb shell` re-parses its arguments through the device's /system/bin/sh, so
+    # any shell metacharacter in the text — ()#&;|<>$`*?~ etc. — would be interpreted
+    # and break the command (e.g. "(Hada Labo)" → "syntax error: unexpected '('").
+    # Quote it so the device shell passes it through literally; `input` still expands
+    # the %s placeholders back into spaces inside the quoted token.
+    run_adb(["shell", "input", "text", shlex.quote(safe)], serial=serial)
     return True

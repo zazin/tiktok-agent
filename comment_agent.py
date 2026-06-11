@@ -43,11 +43,21 @@ DEFAULT_DEDUP_PATH = "dedup_comments.json"
 # comment, or one that can never be typed at all. needs_manual/failed are kept for retry.
 _TERMINAL = ("commented", "skipped_non_ascii")
 
+# Comment-flow statuses that mean nothing was commented (a real failure needing
+# attention), vs. "commented" (success) or "skipped_non_ascii" (nothing typeable —
+# expected/terminal). Logged at ERROR so they surface in error-level log queries (e.g. ES).
+FAILED_STATUSES = {"needs_manual", "wrong_account", "comment_not_found", "failed"}
+
 logger = logging.getLogger(__name__)
 
 
 def _log(msg: str) -> None:
     logger.info(msg)
+
+
+def _log_status(status: str) -> None:
+    """Log a 'tiktok: <status>' outcome at ERROR if it's a failure, else INFO."""
+    logger.log(logging.ERROR if status in FAILED_STATUSES else logging.INFO, f"  tiktok: {status}")
 
 
 def _resolve(store_path: Path, post_url: str, status: str, error: Optional[str] = None) -> None:
@@ -126,14 +136,14 @@ def process_once(
                     post_url, comment, serial=serial, package=package, dry_run=dry_run,
                     account=account, reply_to=reply_to,
                 )
-                _log(f"  tiktok: {status}")
+                _log_status(status)
                 if not dry_run:
                     _resolve(store_path, post_url, status)
                     if status == "commented" and dedup_path is not None:
                         dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
                     _set_status(post_url, status)
             except (TikTokCommentError, PhonePushError) as e:
-                _log(f"  FAILED {post_url}: {e}")
+                logger.error(f"  FAILED {post_url}: {e}")
                 if not dry_run:
                     _resolve(store_path, post_url, "failed", error=str(e))
                     _set_status(post_url, "failed")
@@ -181,7 +191,7 @@ def _watch(
                 post_url, comment, serial=serial, package=package, dry_run=dry_run,
                 account=account, reply_to=reply_to,
             )
-            _log(f"  tiktok: {status}")
+            _log_status(status)
             # In dry-run, leave the message unacked (return None) so it isn't consumed.
             if dry_run:
                 return None
@@ -190,7 +200,7 @@ def _watch(
                 dedup_store.record(dedup_path, dkey, ttl=dedup_ttl)
             return status
         except (TikTokCommentError, PhonePushError) as e:
-            _log(f"  FAILED {post_url}: {e}")
+            logger.error(f"  FAILED {post_url}: {e}")
             if dry_run:
                 return None
             _resolve(store_path, post_url, "failed", error=str(e))
@@ -259,14 +269,14 @@ def _retry_comments(
                 post_url, comment, serial=serial, package=package, dry_run=False,
                 account=account, reply_to=reply_to,
             )
-            _log(f"  tiktok: {status}")
+            _log_status(status)
             _resolve(store_path, post_url, status)
             if status == "commented":
                 if dedup_path is not None:
                     dedup_store.record(dedup_path, dedup_store.content_key(post_url, comment), ttl=dedup_ttl)
                 succeeded += 1
         except (TikTokCommentError, PhonePushError) as e:
-            _log(f"  FAILED {post_url}: {e}")
+            logger.error(f"  FAILED {post_url}: {e}")
             _resolve(store_path, post_url, "failed", error=str(e))
 
     _log(f"Retry: {succeeded} commented, {len(local_store.items(store_path))} still stored.")
