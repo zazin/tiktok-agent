@@ -33,6 +33,7 @@ from core.tiktok_ui import (
     installed_package as _installed_package,
     dump_ui as _dump_ui,
     find_tappable as _find_tappable,
+    find_partial as _find_partial,
     tap as _tap,
     force_stop as _force_stop,
     wait_and_tap as _wait_and_tap,
@@ -50,13 +51,20 @@ POST_FLOW_STEPS: tuple[tuple[str, ...], ...] = (
     ("Posting", "Post", "Posting sekarang", "Kirim"),  # final → publish
 )
 
-# Text fields where a caption/title can be typed (tapped before the final post).
-CAPTION_HINTS = (
-    "Tambahkan judul yang menarik",
-    "Tambahkan deskripsi",
-    "Add a title",
-    "Add caption",
-    "Tell viewers about your post",
+# TikTok's photo composer has TWO separate text fields (verified on
+# com.ss.android.ugc.trill: title EditText id/glc, description EditText id/gl9).
+# We match each field by a DISTINCTIVE SUBSTRING of its placeholder (via
+# find_partial) so a minor wording change or a resource-id reshuffle between app
+# versions doesn't break the match. Re-calibrate against a real `uiautomator dump`
+# if a field stops being found.
+TITLE_HINTS = (
+    "judul",   # "Tambahkan judul yang menarik"
+    "title",   # "Add a title"
+)
+DESCRIPTION_HINTS = (
+    "deskripsi",  # "Tambahkan deskripsi" / "Buat deskripsi yang panjang ..."
+    "describe",
+    "viewers",    # "Tell viewers about your post"
 )
 
 # After a successful post, wait this long (so the upload finishes) before
@@ -64,17 +72,18 @@ CAPTION_HINTS = (
 # low-level UI primitives are shared via tiktok_ui.)
 POST_SUCCESS_KILL_DELAY = 8.0
 
-# Cap the number of hashtags in the on-device caption text; extras beyond this
-# (counting left-to-right) are dropped. The published MQTT message keeps them all.
+# Cap the number of hashtags in the on-device text; extras beyond this (counting
+# left-to-right) are dropped. The published MQTT message keeps them all. Hashtags
+# overwhelmingly live in the description, so the cap is applied there.
 MAX_HASHTAGS = 5
 _HASHTAG_RE = re.compile(r"#\w+", re.UNICODE)
 
-# TikTok's single text field caps the caption at ~90 chars on-device; anything
-# beyond is silently dropped (so a long caption swallows the whole description).
-# We pre-truncate the combined text to this length (at a word boundary) so the
-# result is predictable and the post still succeeds. The MQTT message keeps the
-# full text.
-MAX_POST_CHARS = 90
+# Per-field on-device length caps. The title field drops anything past ~90 chars;
+# the description field allows far more (~4000). We pre-truncate each at a word
+# boundary so the cut is clean rather than letting the device silently swallow the
+# overflow. The MQTT message keeps the full text either way.
+MAX_TITLE_CHARS = 90
+MAX_DESCRIPTION_CHARS = 4000
 
 
 logger = logging.getLogger(__name__)
@@ -152,31 +161,42 @@ def open_in_tiktok(
     return pkg
 
 
-def _type_caption(text: str, serial: Optional[str]) -> bool:
+def _type_into_field(hints: tuple[str, ...], text: str, serial: Optional[str]) -> bool:
     """
-    Tap the caption/title field and type `text`. Best-effort; True if typed.
+    Find the field whose placeholder CONTAINS one of `hints`, tap it, type `text`.
 
-    The caption + description are typed in a single pass with the line break
-    flattened to a space. TikTok's caption box is one field whose soft-keyboard
-    ENTER fires an IME action (Done/Next-style) that steals focus — so pressing
-    KEYCODE_ENTER between "caption" and "description" left the description typed
-    into a defocused field (it never landed). Typing it as one run keeps the whole
-    text in the field; the published MQTT message still carries the original
-    newline-separated text.
+    Best-effort; True if the field was found and typed into. A fresh UI dump is
+    taken each call because the previous field's text changes the tree. The line
+    break is flattened to a space (`adb input text` can't enter a newline cleanly).
     """
-    field = _find_tappable(_dump_ui(serial), CAPTION_HINTS)
+    if not text:
+        return False
+    field = _find_partial(_dump_ui(serial), hints)
     if not field:
         return False
     _tap(serial, *field)
     time.sleep(1.0)
-
     _input_line(text.replace("\n", " "), serial)
     time.sleep(0.3)
-
-    # Dismiss the keyboard so it doesn't cover the Post button.
+    # Dismiss the keyboard so it doesn't cover the next field / the Post button.
     run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
     time.sleep(0.5)
     return True
+
+
+def _type_caption(title: str, description: str, serial: Optional[str]) -> bool:
+    """
+    Fill TikTok's two composer fields: `title` into the title field, `description`
+    into the description field. Best-effort; True if at least one field was typed.
+
+    The fields are filled in separate passes (tap → type → dismiss keyboard) rather
+    than one combined run, so the full description lands in its own ~4000-char field
+    instead of being truncated into the ~90-char title field. The published MQTT
+    message still carries the original caption/description text verbatim.
+    """
+    typed_title = _type_into_field(TITLE_HINTS, title, serial)
+    typed_desc = _type_into_field(DESCRIPTION_HINTS, description, serial)
+    return typed_title or typed_desc
 
 
 def _limit_hashtags(text: str, limit: int = MAX_HASHTAGS) -> str:
@@ -193,27 +213,33 @@ def _limit_hashtags(text: str, limit: int = MAX_HASHTAGS) -> str:
     return re.sub(r"[ \t]{2,}", " ", capped).strip()
 
 
-def build_post_text(caption: Optional[str], description: Optional[str]) -> str:
+def build_title(caption: Optional[str]) -> str:
     """
-    Combine caption + description into TikTok's single text field.
+    Prepare the caption for TikTok's title field (the ~90-char hook line).
 
-    TikTok has only one text box, so the caption (hook + hashtags) goes first and
-    the description follows on a new line. Either may be empty. Hashtags across the
-    combined text are capped at MAX_HASHTAGS (extras dropped left-to-right); the
-    published MQTT message still carries the full text.
+    Truncated at a word boundary to MAX_TITLE_CHARS so the device doesn't silently
+    chop it mid-word. The published MQTT message still carries the full caption.
     """
-    cap = (caption or "").strip()
-    desc = (description or "").strip()
-    combined = f"{cap}\n{desc}" if cap and desc else (cap or desc)
-    return _truncate_post_text(_limit_hashtags(combined))
+    return _truncate_post_text((caption or "").strip(), MAX_TITLE_CHARS)
 
 
-def _truncate_post_text(text: str, limit: int = MAX_POST_CHARS) -> str:
+def build_description(description: Optional[str]) -> str:
+    """
+    Prepare the description for TikTok's description field (the ~4000-char body).
+
+    Hashtags are capped at MAX_HASHTAGS (extras dropped left-to-right) and the text
+    is truncated at a word boundary to MAX_DESCRIPTION_CHARS. The published MQTT
+    message still carries the full description.
+    """
+    return _truncate_post_text(_limit_hashtags((description or "").strip()), MAX_DESCRIPTION_CHARS)
+
+
+def _truncate_post_text(text: str, limit: int) -> str:
     """Cap `text` at `limit` chars, cutting at the last word boundary if possible.
 
-    TikTok's caption field drops anything past ~MAX_POST_CHARS, so we truncate
-    ourselves to keep the cut clean (no mid-word chop) rather than letting the
-    device silently swallow the overflow.
+    TikTok's fields drop anything past their on-device cap, so we truncate ourselves
+    to keep the cut clean (no mid-word chop) rather than letting the device silently
+    swallow the overflow.
     """
     if len(text) <= limit:
         return text
@@ -256,8 +282,9 @@ def post(
     ("wrong_account"/"needs_manual") TikTok is force-stopped so it isn't left open;
     the message stays spooled for --retry.
 
-    The caption and description are combined (see build_post_text) into TikTok's
-    single text field — caption first, description on the next line.
+    The caption goes into TikTok's title field and the description into its separate
+    description field (see build_title / build_description), each capped to that
+    field's on-device length limit.
 
     Raises:
         TikTokPostError: If Phase 1 itself fails (no TikTok / unshareable image).
@@ -279,18 +306,19 @@ def post(
         if not auto_post and not dry_run:
             return "composer_open"
 
-        post_text = build_post_text(caption, description)
+        post_title = build_title(caption)
+        post_description = build_description(description)
 
         # Phase 2 — walk the ordered post flow. The final step is the actual publish;
-        # type the post text (if any) on the screen just before it.
+        # fill the title + description fields (if any) on the screen just before it.
         last_idx = len(POST_FLOW_STEPS) - 1
         for idx, labels in enumerate(POST_FLOW_STEPS):
-            if idx == last_idx and post_text:
-                _type_caption(post_text, serial)  # best-effort, never fatal
+            if idx == last_idx and (post_title or post_description):
+                _type_caption(post_title, post_description, serial)  # best-effort, never fatal
             if idx == last_idx and dry_run:
-                # Caption typed, on the final screen — stop here WITHOUT tapping Post,
+                # Fields typed, on the final screen — stop here WITHOUT tapping Post,
                 # leaving the composer open so the on-device text can be inspected.
-                logger.info("  dry-run: caption typed, leaving composer open (NOT posting)")
+                logger.info("  dry-run: title + description typed, leaving composer open (NOT posting)")
                 return "dry_run"
             if not _wait_and_tap(labels, serial):
                 # A screen we didn't recognize — force-stop TikTok rather than leaving
