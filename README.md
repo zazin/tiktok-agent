@@ -129,7 +129,8 @@ next consumer **waits its turn** (it logs `[device] busy — waiting for the pho
 rather than interleaving. So running all the watchers at once is safe.
 
 **Caption + description** come straight from the message's `Caption` and `Description`
-fields, combined into TikTok's single text field (caption first, description on the next line).
+fields and go into TikTok's **two** composer fields — `Caption` into the title field
+(~90 chars), `Description` into the separate description field (~4000 chars).
 In `--source imagekit` mode they're read from ImageKit `customMetadata` instead; `tiktok-post`
 can do the same lookup with `--from-imagekit`, or you can pass `--caption`/`--description`.
 
