@@ -32,6 +32,11 @@ schema, and the status message) — read only the one for the feature you publis
 Both are **QoS 1, retained = false**. See each file for required vs. optional fields
 and the list of `status` values.
 
+> Working on the agent code itself (not just publishing)? The maintainer-facing
+> internals — architecture, queueing/state, the brittle device-automation flows,
+> logging, and setup — live in [`internals/`](internals/) (indexed from the repo-root
+> `CLAUDE.md`).
+
 > ⚠️ These contracts are shared across two repositories. Renaming a field,
 > changing a topic name, or dropping to QoS 0 silently breaks the agent. Treat any
 > change here as a breaking API change and coordinate both sides.

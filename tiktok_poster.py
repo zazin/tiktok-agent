@@ -69,6 +69,13 @@ POST_SUCCESS_KILL_DELAY = 8.0
 MAX_HASHTAGS = 5
 _HASHTAG_RE = re.compile(r"#\w+", re.UNICODE)
 
+# TikTok's single text field caps the caption at ~90 chars on-device; anything
+# beyond is silently dropped (so a long caption swallows the whole description).
+# We pre-truncate the combined text to this length (at a word boundary) so the
+# result is predictable and the post still succeeds. The MQTT message keeps the
+# full text.
+MAX_POST_CHARS = 90
+
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +205,25 @@ def build_post_text(caption: Optional[str], description: Optional[str]) -> str:
     cap = (caption or "").strip()
     desc = (description or "").strip()
     combined = f"{cap}\n{desc}" if cap and desc else (cap or desc)
-    return _limit_hashtags(combined)
+    return _truncate_post_text(_limit_hashtags(combined))
+
+
+def _truncate_post_text(text: str, limit: int = MAX_POST_CHARS) -> str:
+    """Cap `text` at `limit` chars, cutting at the last word boundary if possible.
+
+    TikTok's caption field drops anything past ~MAX_POST_CHARS, so we truncate
+    ourselves to keep the cut clean (no mid-word chop) rather than letting the
+    device silently swallow the overflow.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    # Prefer cutting at the last whitespace so we don't slice a word/hashtag in half,
+    # unless that would throw away most of the text.
+    cut = head.rsplit(None, 1)[0] if " " in head.strip() else head
+    if len(cut) < limit // 2:
+        cut = head
+    return cut.rstrip()
 
 
 def post(
@@ -210,6 +235,7 @@ def post(
     package: Optional[str] = None,
     auto_post: bool = False,
     account: Optional[str] = None,
+    dry_run: bool = False,
 ) -> str:
     """
     Post an already-pushed image to TikTok.
@@ -217,6 +243,11 @@ def post(
     If `account` is given, make sure that TikTok account is active first (switching
     via the in-app switcher); if it can't be confirmed, return "wrong_account"
     WITHOUT opening the composer, so we never post to the wrong account.
+
+    If dry_run is True, walk the post flow and type the caption exactly as a real
+    post would, but STOP before the final Post tap — leaving the composer open with
+    the (possibly truncated) caption visible for inspection. Returns "dry_run" and
+    never publishes.
 
     Phase 1 always opens the composer. If auto_post is False, returns "composer_open"
     (left open on purpose for manual finishing). If auto_post is True, attempts to
@@ -245,7 +276,7 @@ def post(
         pkg = open_in_tiktok(remote_path, serial=serial, package=package)
         time.sleep(STEP_DELAY)
 
-        if not auto_post:
+        if not auto_post and not dry_run:
             return "composer_open"
 
         post_text = build_post_text(caption, description)
@@ -256,6 +287,11 @@ def post(
         for idx, labels in enumerate(POST_FLOW_STEPS):
             if idx == last_idx and post_text:
                 _type_caption(post_text, serial)  # best-effort, never fatal
+            if idx == last_idx and dry_run:
+                # Caption typed, on the final screen — stop here WITHOUT tapping Post,
+                # leaving the composer open so the on-device text can be inspected.
+                logger.info("  dry-run: caption typed, leaving composer open (NOT posting)")
+                return "dry_run"
             if not _wait_and_tap(labels, serial):
                 # A screen we didn't recognize — force-stop TikTok rather than leaving
                 # the composer open; the message stays spooled for --retry.
@@ -331,6 +367,7 @@ def _cli() -> int:
     parser.add_argument("--package", default=None, help="Override TikTok package name")
     parser.add_argument("--account", default=None, help="Target TikTok @handle to switch to before posting")
     parser.add_argument("--auto-post", action="store_true", help="Drive Next/Post automatically (brittle; actually publishes)")
+    parser.add_argument("--dry-run", action="store_true", help="Walk the flow and type the caption, but STOP before the final Post tap (leaves composer open for inspection; never publishes)")
     args = parser.parse_args()
 
     if args.list:
@@ -364,6 +401,7 @@ def _cli() -> int:
             package=args.package,
             auto_post=args.auto_post,
             account=args.account,
+            dry_run=args.dry_run,
         )
     except TikTokPostError as e:
         logger.error("Error: %s", e)
