@@ -53,8 +53,8 @@ the broker will disconnect the agent.
 |-------|------|:--------:|-------------|
 | `id` | string | **yes** | Correlation key, echoed back in the status message. Use a UUID or your own post id. A message without a non-empty `id` is **dropped**. |
 | `ImageURL` | string (URL) | **yes** | Public image URL the agent downloads (no auth). A message without a non-empty `ImageURL` is **dropped**. |
-| `Caption` | string | no | The hook line. Goes first in TikTok's single text field. |
-| `Description` | string | no | Appended after the caption on a new line. |
+| `Caption` | string | no | The hook line. Goes into TikTok's **title** field (capped at ~90 chars on-device). |
+| `Description` | string | no | Goes into TikTok's separate **description** field (capped at ~4000 chars on-device). |
 | `ImagePath` | string | no | Suggested filename on the phone; if omitted the agent derives one from `ImageURL`. |
 | `Account` | string (`@handle`) | no | TikTok account to post as. The agent switches to it via the in-app account switcher **before** posting; if it can't confirm the account is active it reports `wrong_account` and **does not post**. Omit to post as whatever account is currently active. |
 | `CreatedAt` | string (ISO-8601) | no | Informational only. |

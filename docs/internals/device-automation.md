@@ -29,32 +29,45 @@ Deliberately split because UI automation is fragile and arguably against TikTok'
   the item stays spooled for `--retry`. The **only** path that leaves TikTok open is
   `composer_open` (`--no-auto-post`), an explicit "push to phone, finish by hand" mode.
 
-**Dry-run (`dry_run=True`, CLI `--dry-run`):** walks the flow and types the caption
-exactly as a real post would, but **stops before the final Post tap** — leaving the
-composer open with the (possibly truncated) caption visible for inspection. Returns
-`"dry_run"` and never publishes. Use it to eyeball the on-device caption text.
+**Dry-run (`dry_run=True`, CLI `--dry-run`):** walks the flow and fills the title +
+description fields exactly as a real post would, but **stops before the final Post
+tap** — leaving the composer open with the (possibly truncated) text visible for
+inspection. Returns `"dry_run"` and never publishes. Use it to eyeball the on-device
+text.
 
 **Tuning knobs (top of `tiktok_poster.py`):** `TIKTOK_PACKAGES`, `POST_FLOW_STEPS`,
-`CAPTION_HINTS`, `STEP_DELAY`, `STEP_RETRIES`, `POST_SUCCESS_KILL_DELAY`,
-`MAX_HASHTAGS`, `MAX_POST_CHARS`.
+`TITLE_HINTS`, `DESCRIPTION_HINTS`, `STEP_DELAY`, `STEP_RETRIES`,
+`POST_SUCCESS_KILL_DELAY`, `MAX_HASHTAGS`, `MAX_TITLE_CHARS`, `MAX_DESCRIPTION_CHARS`.
 
 ## Caption handling
 
-TikTok has a single text field. `build_post_text` combines the `Caption` (hook) and
-`Description` message fields (or ImageKit `customMetadata.caption`/`description` in
-legacy mode) into one string — caption first, description on the next line. Hashtags
-across the combined text are capped at `MAX_HASHTAGS` (extras dropped left-to-right).
+TikTok's photo composer has **two separate text fields** — a title field
+(~90 chars) and a description field (~4000 chars). Verified on
+`com.ss.android.ugc.trill`: title `EditText id/glc`, description `EditText id/gl9`.
+`_type_caption` fills each in its own pass (tap → type → dismiss keyboard), locating
+each field by a **distinctive substring** of its placeholder (via `find_partial`) so a
+minor wording change or a resource-id reshuffle between app versions doesn't break the
+match — `TITLE_HINTS` (`judul`/`title`), `DESCRIPTION_HINTS`
+(`deskripsi`/`describe`/`viewers`). Re-calibrate these against a real `uiautomator
+dump` if a field stops being found.
 
-**Length cap:** the on-device caption field drops anything past ~90 chars (a long
-caption would otherwise swallow the whole description). `build_post_text` therefore
-truncates the combined text to `MAX_POST_CHARS` (90) at a word boundary
-(`_truncate_post_text`) so the cut is clean and the post still succeeds. The full text
-still lives in the published MQTT message.
+- `build_title` prepares the `Caption` (hook) for the title field.
+- `build_description` prepares the `Description` for the description field. Hashtags —
+  which overwhelmingly live in the description — are capped at `MAX_HASHTAGS` (extras
+  dropped left-to-right).
+
+In legacy ImageKit mode the two fields come from `customMetadata.caption`/`description`
+instead of the message `Caption`/`Description`.
+
+**Length caps:** each field drops anything past its on-device limit, so the builders
+truncate at a word boundary (`_truncate_post_text`) — `MAX_TITLE_CHARS` (90) for the
+title, `MAX_DESCRIPTION_CHARS` (4000) for the description — so the cut is clean and the
+post still succeeds. The full text still lives in the published MQTT message.
 
 Typing uses `adb input text`, which **cannot enter emoji/non-ASCII**: `_input_line`
-strips non-ASCII and quote chars, maps spaces to `%s`; newlines become
-`KEYCODE_ENTER`. (Note: the pipeline does **not** store hashtags — captions/
-descriptions are effectively hashtag-free aside from any inline ones.)
+strips non-ASCII and quote chars, maps spaces to `%s`. Each field is typed as a single
+line — any newline in the text is flattened to a space (`adb input text` can't enter a
+newline cleanly).
 
 ## Multi-account (`tiktok_profile.py`)
 
