@@ -32,32 +32,13 @@ The pipeline publishes one **QoS-1, retained-false** JSON message per post to th
 > `tiktok/comments`, `tiktok/comments-read`), exact field schemas, status messages,
 > and QoS/ack semantics.
 
-## Files
+## Layout
 
-The CLI entry points live at the top level; the shared, non-CLI library modules
-live in the `core/` package.
-
-| File | Purpose |
-|------|---------|
-| `agent.py` | Orchestrator — poll → download → push → auto-post → report status (`--source`, `--catch-up`) |
-| `hivemq_source.py` | Drain the work topic + publish/ack outcomes over MQTT (paho, also the `tiktok-hivemq` CLI) |
-| `imagekit_source.py` | `download()` images (used by both sources) + list the ImageKit folder (legacy queue) |
-| `tiktok_poster.py` | Best-effort auto-post via adb UI automation (also the `tiktok-post` CLI) |
-| `tiktok_profile.py` | Read/switch the active TikTok account before acting (also the `tiktok-profile` CLI) |
-| `comment_agent.py` | Comment-on-post orchestrator + `tiktok-commenter` CLI (independent of posting) |
-| `comment_reader_agent.py` | Comment-reader orchestrator + `tiktok-comment-reader` CLI — scrape a post's comments back to the backend |
-| `tiktok_commenter.py` | adb UI automation to open a post by URL and submit a comment / reply, and scrape the comment sheet |
-| `watch_all.py` | `tiktok-watch-all` CLI — run all three watchers (posts + comments + reads) in **one** process |
-| `core/mqtt_queue.py` | **Shared** durable MQTT work-queue (`MqttWorkQueue`); backs `hivemq_source`, `comment_source`, `comment_read_source` |
-| `core/comment_source.py` | Thin comment-topic wiring over `MqttWorkQueue` (own topic/client-id/status) |
-| `core/comment_read_source.py` | Thin comment-read wiring over `MqttWorkQueue` (own topic/client-id, output = `comments-list`) |
-| `core/tiktok_ui.py` | **Shared** low-level adb/UI primitives (dump, find, tap, type, force-stop) for poster/commenter/profile |
-| `core/device_lock.py` | **Shared** cross-process `fcntl.flock` serializing device flows — only one consumer drives the phone at a time |
-| `core/adb_pusher.py` | `run_adb()` + push an image to the phone gallery over adb (+ media scan) |
-| `core/imagekit_agent.py` | Legacy `--source imagekit` orchestration (split out of `agent.py`) |
-| `core/local_store.py` | One-JSON-per-message spool dir shared by both consumers (for `--retry`) |
-| `core/env_loader.py` | Zero-dependency `.env` loader |
-| `agent_state.json` | Local record of processed `fileId`s — **`--source imagekit` only**, gitignored |
+CLI entry points live at the top level (`agent.py`, `tiktok_poster.py`,
+`tiktok_profile.py`, `comment_agent.py`, `comment_reader_agent.py`, `watch_all.py`,
+…); the shared, non-CLI library modules live in the `core/` package. For a
+module-by-module breakdown see
+[docs/internals/architecture.md](docs/internals/architecture.md).
 
 ## Quick Start
 
