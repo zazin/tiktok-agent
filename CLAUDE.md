@@ -40,7 +40,8 @@ This file is the lean index. Deep dives live in `docs/`:
   modes, manual-ack outcomes, the local spool dir, `--catch-up`, the duplicate-message
   guard, the legacy ImageKit state file.
 - [device-automation.md](docs/internals/device-automation.md) — **the brittle parts**:
-  auto-post two phases, caption handling (incl. the 90-char cap), multi-account
+  auto-post two phases, caption handling (separate title + description fields,
+  90 / 4000-char caps), multi-account
   switching, comment-on-post + comment-reader UI calibration facts.
 - [logging.md](docs/internals/logging.md) — stdlib logging → Elasticsearch Serverless.
 - [setup.md](docs/internals/setup.md) — runtime prerequisites, `.env` credentials,
