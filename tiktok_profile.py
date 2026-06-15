@@ -73,8 +73,27 @@ PROFILE_TAB_LABELS = ("Profil", "Profile", "Profilku", "Me")
 # (Per-step pacing STEP_DELAY/STEP_RETRIES and the low-level UI primitives are
 # shared via tiktok_ui.)
 
+# Selecting an account row needs a touch with a REAL press duration: an instant
+# `input tap` closes the sheet but is silently ignored by TikTok's switch handler
+# (verified on com.ss.android.ugc.trill — the row's click detector wants a DOWN→UP
+# gap). A same-point `input swipe` of this many ms supplies that. Kept well under the
+# long-press threshold so it doesn't open the row's context menu instead.
+ROW_PRESS_MS = 150
+
 
 logger = logging.getLogger(__name__)
+
+
+def _press_row(serial: Optional[str], x: int, y: int) -> None:
+    """Tap an account-switcher row with a real press duration (see ROW_PRESS_MS).
+
+    Unlike the shared instant `tap`, this issues a same-point `input swipe` so the
+    touch lingers long enough for TikTok to register the switch.
+    """
+    run_adb(
+        ["shell", "input", "swipe", str(x), str(y), str(x), str(y), str(ROW_PRESS_MS)],
+        serial=serial,
+    )
 
 
 class TikTokProfileError(Exception):
@@ -168,11 +187,18 @@ def _find_switch_trigger(xml: str) -> Optional[tuple[int, int]]:
     return (best[1], best[2]) if best else None
 
 
-def _open_profile(serial: Optional[str], package: Optional[str]) -> None:
-    """Open the current user's own profile via a deep link (works even from the feed).
+def _open_profile(serial: Optional[str], package: Optional[str]) -> str:
+    """Open the current user's own profile via a deep link and return its @handle.
 
     The home feed blocks `uiautomator dump`, so we can't reliably tap the bottom-nav
     Profile tab; a VIEW intent on snssdk1233://profile lands on the profile directly.
+
+    After firing the intent the header doesn't render instantly — a cold/slow profile
+    load, a still-waking device, or the feed not yet dismissed can leave the first dump
+    without a readable handle. So we POLL (up to STEP_RETRIES, like the other UI flows)
+    for the header to appear rather than dumping once; a single shot here produced
+    spurious "wrong_account" failures on retry bursts. Returns the handle so the caller
+    needn't re-dump (which is itself a flakiness point). Raises if no deep link lands.
     """
     pkg = package or _installed_package(serial)
     if not pkg:
@@ -186,12 +212,15 @@ def _open_profile(serial: Optional[str], package: Optional[str]) -> None:
                 ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", shlex.quote(uri), "-p", pkg],
                 serial=serial,
             )
-            time.sleep(STEP_DELAY)
-            # Confirm we actually reached a profile (the header handle is readable).
-            if _first_handle(_dump_ui(serial)):
-                return
         except PhonePushError as e:
             last_err = e
+            continue  # this deep link couldn't even be fired; try the next one
+        # Poll for the header handle to render before giving up on this deep link.
+        for _ in range(STEP_RETRIES):
+            time.sleep(STEP_DELAY)
+            handle = _first_handle(_dump_ui(serial))
+            if handle:
+                return handle
     raise TikTokProfileError(
         f"could not open the profile via deep link ({', '.join(PROFILE_DEEPLINKS)})"
         + (f": {last_err}" if last_err else "")
@@ -199,9 +228,11 @@ def _open_profile(serial: Optional[str], package: Optional[str]) -> None:
 
 
 def current_account(serial: Optional[str] = None, package: Optional[str] = None) -> Optional[str]:
-    """Open the profile (deep link) and return the active @handle (or None)."""
-    _open_profile(serial, package)
-    return _first_handle(_dump_ui(serial))
+    """Open the profile (deep link) and return the active @handle.
+
+    Raises TikTokProfileError if no deep link reaches a readable profile header.
+    """
+    return _open_profile(serial, package)
 
 
 def switch_account(target: str, *, serial: Optional[str] = None, package: Optional[str] = None) -> bool:
@@ -215,11 +246,13 @@ def switch_account(target: str, *, serial: Optional[str] = None, package: Option
         return False
     _tap(serial, *trigger)
     time.sleep(STEP_DELAY)
-    # Find and tap the target account's row.
+    # Find and select the target account's row. Matched by handle on a FRESH dump
+    # each pass, so the order of rows in the sheet (which TikTok may reshuffle) never
+    # matters. Selected with a real press, not an instant tap (see _press_row).
     for _ in range(STEP_RETRIES):
         row = _find_account_row(_dump_ui(serial), target)
         if row:
-            _tap(serial, *row)
+            _press_row(serial, *row)
             time.sleep(STEP_DELAY)
             return True
         time.sleep(STEP_DELAY)
