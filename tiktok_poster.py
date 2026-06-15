@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from typing import Optional
 
@@ -77,6 +78,10 @@ POST_SUCCESS_KILL_DELAY = 8.0
 # overwhelmingly live in the description, so the cap is applied there.
 MAX_HASHTAGS = 5
 _HASHTAG_RE = re.compile(r"#\w+", re.UNICODE)
+# A description that ENDS on a #hashtag or @mention leaves TikTok's suggestion
+# dropdown open over the Post button. We terminate that token with a space keyevent
+# so the dropdown closes (see _type_into_field). Only fires when this matches.
+_TRAILING_TAG_RE = re.compile(r"[#@]\w+\s*$", re.UNICODE)
 
 # Per-field on-device length caps. The title field drops anything past ~90 chars;
 # the description field allows far more (~4000). We pre-truncate each at a word
@@ -176,11 +181,18 @@ def _type_into_field(hints: tuple[str, ...], text: str, serial: Optional[str]) -
         return False
     _tap(serial, *field)
     time.sleep(1.0)
-    _input_line(text.replace("\n", " "), serial)
-    time.sleep(0.3)
+    typed = text.replace("\n", " ")
+    _input_line(typed, serial)
+    time.sleep(0.5)
+    # If the text ends on a #hashtag / @mention, TikTok's suggestion dropdown is open
+    # and covers the Post button (and the keyboard-dismiss below won't close it). Type
+    # a real space to terminate the token so the dropdown collapses first.
+    if _TRAILING_TAG_RE.search(typed):
+        run_adb(["shell", "input", "keyevent", "62"], serial=serial)  # KEYCODE_SPACE
+        time.sleep(0.3)
     # Dismiss the keyboard so it doesn't cover the next field / the Post button.
     run_adb(["shell", "input", "keyevent", "111"], serial=serial)  # KEYCODE_ESCAPE
-    time.sleep(0.5)
+    time.sleep(1.0)
     return True
 
 
