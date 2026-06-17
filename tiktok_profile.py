@@ -80,6 +80,11 @@ PROFILE_TAB_LABELS = ("Profil", "Profile", "Profilku", "Me")
 # long-press threshold so it doesn't open the row's context menu instead.
 ROW_PRESS_MS = 150
 
+# How many times ensure_account repeats the open-sheet → tap-row → confirm cycle
+# before giving up. A press that lands during the sheet's open animation taps but
+# isn't registered, so one retry recovers the common transient miss.
+SWITCH_ATTEMPTS = 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +246,17 @@ def switch_account(target: str, *, serial: Optional[str] = None, package: Option
     Assumes the profile screen is open. Taps the display-name button to open the
     "Beralih akun" sheet, then taps the row whose bare handle equals `target`.
     """
-    trigger = _find_switch_trigger(_dump_ui(serial))
+    # Poll for the switch trigger before giving up: on a cold/slow profile open
+    # (the first post of the day) the header isn't fully rendered when we dump, so
+    # a single-shot find returned None and bailed out as a spurious "could not
+    # switch". Mirror the retry-on-dump loop _open_profile already uses for the
+    # handle (and the row loop below) rather than trusting one dump.
+    trigger = None
+    for _ in range(STEP_RETRIES):
+        trigger = _find_switch_trigger(_dump_ui(serial))
+        if trigger:
+            break
+        time.sleep(STEP_DELAY)
     if not trigger:
         return False
     _tap(serial, *trigger)
@@ -275,20 +290,28 @@ def ensure_account(target: str, *, serial: Optional[str] = None, package: Option
     if _norm(current) == want:
         return  # already on the right account
 
-    # current_account left us on the profile screen, so switch_account can proceed.
-    if not switch_account(target, serial=serial, package=package):
-        raise TikTokProfileError(
-            f"could not switch to @{want} (current: {current or 'unknown'}) — "
-            "is it added to the in-app account switcher?"
-        )
+    # Try the open-sheet → tap-row → re-read-to-confirm cycle up to twice: a press
+    # that lands mid-animation taps but doesn't register, leaving us on the old
+    # account (the "switch did not confirm" failure). One clean retry absorbs that
+    # transient without waiting for QoS redelivery. current_account left us on the
+    # profile screen, so the first switch_account can proceed immediately.
+    for attempt in range(SWITCH_ATTEMPTS):
+        if not switch_account(target, serial=serial, package=package):
+            raise TikTokProfileError(
+                f"could not switch to @{want} (current: {current or 'unknown'}) — "
+                "is it added to the in-app account switcher?"
+            )
 
-    # After a switch TikTok reloads to the feed (which blocks dumps), so re-open the
-    # profile by deep link before reading the handle to CONFIRM the switch landed.
-    confirmed = current_account(serial, package)
-    if _norm(confirmed) != want:
-        raise TikTokProfileError(
-            f"switch did not confirm @{want} (now: {confirmed or 'unknown'})"
-        )
+        # After a switch TikTok reloads to the feed (which blocks dumps), so re-open
+        # the profile by deep link before reading the handle to CONFIRM the switch.
+        confirmed = current_account(serial, package)
+        if _norm(confirmed) == want:
+            return
+        current = confirmed  # re-open left us on the profile; retry the switch
+
+    raise TikTokProfileError(
+        f"switch did not confirm @{want} (now: {confirmed or 'unknown'})"
+    )
 
 
 def _cli() -> int:
