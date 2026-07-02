@@ -70,6 +70,12 @@ HANDLE_RE = re.compile(r"@[A-Za-z0-9._]*[A-Za-z][A-Za-z0-9._]*")
 # dump is available (it isn't on the feed). Kept for manual/diagnostic use.
 PROFILE_TAB_LABELS = ("Profil", "Profile", "Profilku", "Me")
 
+# Labels that mark the OPEN "Switch account" sheet. Used to distinguish a sheet that
+# opened but hasn't rendered the target row yet (keep polling) from a trigger tap that
+# was a no-op because the cold profile wasn't interactive yet (re-tap the trigger).
+# Locale-specific, like the rest of this module.
+ACCOUNT_SHEET_LABELS = ("Beralih akun", "Switch account", "Tambah akun", "Add account")
+
 # (Per-step pacing STEP_DELAY/STEP_RETRIES and the low-level UI primitives are
 # shared via tiktok_ui.)
 
@@ -128,6 +134,24 @@ def _first_handle(xml: str) -> Optional[str]:
         if m:
             return m.group(0)
     return None
+
+
+def _sheet_is_open(xml: str) -> bool:
+    """True if the dump shows the open "Switch account" sheet (see ACCOUNT_SHEET_LABELS).
+
+    Lets switch_account tell "sheet open, target row not rendered yet" (keep polling)
+    from "trigger tap was a no-op, sheet never opened" (re-tap the trigger) — the
+    cold-start failure that used to surface as a hard "could not switch".
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return False
+    for node in root.iter("node"):
+        for attr in (node.get("text"), node.get("content-desc")):
+            if attr and any(lbl.lower() in attr.lower() for lbl in ACCOUNT_SHEET_LABELS):
+                return True
+    return False
 
 
 def _find_account_row(xml: str, target: str) -> Optional[tuple[int, int]]:
@@ -264,12 +288,22 @@ def switch_account(target: str, *, serial: Optional[str] = None, package: Option
     # Find and select the target account's row. Matched by handle on a FRESH dump
     # each pass, so the order of rows in the sheet (which TikTok may reshuffle) never
     # matters. Selected with a real press, not an instant tap (see _press_row).
+    #
+    # On a cold/slow profile the trigger tap can land before the header is interactive
+    # and be silently dropped, so the sheet never opens and every row dump comes back
+    # empty — the old single-tap version then exhausted its retries and returned False,
+    # which ensure_account turns into a hard "could not switch" (no in-process retry).
+    # So when a dump shows no row AND the sheet isn't open, RE-TAP the trigger (re-located
+    # in case the header shifted) instead of polling a screen that will never show it.
     for _ in range(STEP_RETRIES):
-        row = _find_account_row(_dump_ui(serial), target)
+        xml = _dump_ui(serial)
+        row = _find_account_row(xml, target)
         if row:
             _press_row(serial, *row)
             time.sleep(STEP_DELAY)
             return True
+        if not _sheet_is_open(xml):
+            _tap(serial, *(_find_switch_trigger(xml) or trigger))
         time.sleep(STEP_DELAY)
     return False
 
